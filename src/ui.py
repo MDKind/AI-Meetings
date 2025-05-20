@@ -33,6 +33,7 @@ class AudioAssistantUI:
         self.is_recording = False
         self.is_processing = False
         self.device_index = None
+        self.device_type = None
         
         # Создаем пользовательский интерфейс
         self.create_ui()
@@ -63,7 +64,7 @@ class AudioAssistantUI:
         input_frame = ttk.Frame(control_frame)
         input_frame.pack(fill="x", pady=5)
         
-        ttk.Label(input_frame, text="Устройство ввода:", font=default_font).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(input_frame, text="Устройство:", font=default_font).grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.device_combobox = ttk.Combobox(input_frame, width=40, font=default_font)
         self.device_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
         
@@ -111,40 +112,55 @@ class AudioAssistantUI:
         ttk.Button(buttons_frame, text="Очистить историю", 
                   command=self.clear_history, width=15).pack(side="left", padx=5)
         
-        # Создаем панель с вкладками для вывода информации
-        notebook = ttk.Notebook(main_frame)
-        notebook.pack(fill="both", expand=True, pady=5)
+        # Создаем разделенное окно для одновременного отображения распознанного текста и ответов ChatGPT
+        content_frame = ttk.Frame(main_frame)
+        content_frame.pack(fill="both", expand=True, pady=5)
         
-        # Вкладка для вывода распознанного текста
-        text_frame = ttk.Frame(notebook, padding=5)
-        notebook.add(text_frame, text="Распознанный текст")
+        # Создаем вертикальный разделитель панелей (верхняя и нижняя части)
+        paned_window = ttk.PanedWindow(content_frame, orient=tk.VERTICAL)
+        paned_window.pack(fill="both", expand=True)
+        
+        # Панель для распознанного текста (верхняя часть)
+        text_frame = ttk.LabelFrame(paned_window, text="Распознанный текст", padding=5)
+        paned_window.add(text_frame, weight=1)
         
         self.transcription_text = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, 
-                                                          font=default_font, height=10)
+                                                          font=default_font, height=8)
         self.transcription_text.pack(fill="both", expand=True)
         
-        # Вкладка для вывода ответов ChatGPT
-        chat_frame = ttk.Frame(notebook, padding=5)
-        notebook.add(chat_frame, text="Ответы ChatGPT")
+        # Панель для ответов ChatGPT (нижняя часть)
+        chat_frame = ttk.LabelFrame(paned_window, text="Ответы ChatGPT", padding=5)
+        paned_window.add(chat_frame, weight=1)
         
         self.chat_text = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, 
-                                                 font=default_font, height=15)
+                                                 font=default_font, height=8)
         self.chat_text.pack(fill="both", expand=True)
+        
+        # Создаем вкладки для саммари и настроек
+        notebook = ttk.Notebook(main_frame)
+        notebook.pack(fill="both", expand=True, pady=5)
         
         # Вкладка для саммари
         summary_frame = ttk.Frame(notebook, padding=5)
         notebook.add(summary_frame, text="Саммари встречи")
         
         self.summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD, 
-                                                    font=default_font, height=15)
+                                                    font=default_font, height=10)
         self.summary_text.pack(fill="both", expand=True)
         
         # Панель статуса
+        status_frame = ttk.Frame(self.root)
+        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Добавляем индикатор аудио уровня
+        self.audio_level_canvas = tk.Canvas(status_frame, width=100, height=15, bg="white")
+        self.audio_level_canvas.pack(side=tk.RIGHT, padx=5)
+        
         self.status_var = tk.StringVar()
         self.status_var.set("Готов к работе")
-        self.status_bar = ttk.Label(self.root, textvariable=self.status_var, 
+        self.status_bar = ttk.Label(status_frame, textvariable=self.status_var, 
                                    relief=tk.SUNKEN, anchor=tk.W, font=("Arial", 9))
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
     
     def refresh_devices(self):
         """
@@ -156,10 +172,24 @@ class AudioAssistantUI:
         # Получаем список устройств
         devices = self.audio_capture.list_devices()
         
-        # Обновляем выпадающий список
-        self.device_combobox['values'] = [f"{i}: {name}" for i, name in devices]
+        # Обновляем выпадающий список, добавив цветовую маркировку для разных типов устройств
+        self.device_combobox['values'] = []
+        device_strings = []
         
-        if devices:
+        for i, (device_id, name, device_type) in enumerate(devices):
+            if device_type == "microphone":
+                # Микрофоны
+                device_strings.append(f"{i}: {name}")
+            elif device_type == "system_sound":
+                # Системный звук (Stereo Mix)
+                device_strings.append(f"{i}: {name}")
+            elif device_type == "output":
+                # Устройства вывода
+                device_strings.append(f"{i}: {name}")
+        
+        self.device_combobox['values'] = device_strings
+        
+        if device_strings:
             self.device_combobox.current(0)
     
     def toggle_recording(self):
@@ -170,7 +200,6 @@ class AudioAssistantUI:
             self.start_recording()
         else:
             self.stop_recording()
-    
     
     def start_recording(self):
         """
@@ -187,13 +216,36 @@ class AudioAssistantUI:
             device_id_str = device_str.split(":")[0].strip()
             device_index = int(device_id_str)  # Получаем числовой индекс
             
+            # Получаем полную информацию об устройстве
+            devices = self.audio_capture.list_devices()
+            device_info = None
+            
+            for d_id, d_name, d_type in devices:
+                if d_id == device_index:
+                    device_info = (d_id, d_name, d_type)
+                    break
+            
+            if not device_info:
+                messagebox.showerror("Ошибка", f"Не удалось найти информацию об устройстве {device_index}")
+                return
+                
+            device_id, device_name, device_type = device_info
+            
             # Определяем тип устройства для статусной строки
-            device_type = "микрофона"
-            if "Системный звук" in device_str:
-                device_type = "системного звука"
+            device_display_type = "устройства"
+            if device_type == "microphone":
+                device_display_type = "микрофона"
+            elif device_type == "system_sound":
+                device_display_type = "системного звука"
+            elif device_type == "output":
+                device_display_type = "устройства вывода"
+            
+            # Сохраняем выбранное устройство
+            self.device_index = device_id
+            self.device_type = device_type
                 
         except (ValueError, IndexError) as e:
-            messagebox.showerror("Ошибка", f"Выберите корректное устройство ввода: {e}")
+            messagebox.showerror("Ошибка", f"Выберите корректное устройство: {e}")
             return
         
         # Проверяем модель распознавания
@@ -222,7 +274,7 @@ class AudioAssistantUI:
         
         # Запускаем запись
         try:
-            self.audio_capture.start_recording(device_index=device_index)
+            self.audio_capture.start_recording(device_index=self.device_index, device_type=self.device_type)
             self.is_recording = True
             
             # Запускаем обработку в отдельном потоке
@@ -231,9 +283,12 @@ class AudioAssistantUI:
             self.processing_thread.daemon = True
             self.processing_thread.start()
             
+            # Запускаем обновление индикатора аудио
+            self.update_audio_level()
+            
             # Обновляем UI
             self.start_button.config(text="Остановить запись")
-            self.status_var.set(f"Запись и обработка аудио с {device_type}...")
+            self.status_var.set(f"Запись и обработка аудио с {device_display_type} ({device_name})...")
         except Exception as e:
             messagebox.showerror("Ошибка записи", f"Не удалось начать запись: {e}")
             self.is_recording = False
@@ -289,11 +344,51 @@ class AudioAssistantUI:
                     self.status_var.set("Готов к обработке следующего фрагмента")
                 
                 # Сохраняем аудио для отладки (опционально)
-                # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 # self.audio_capture.save_audio(frames, f"audio_{timestamp}.wav")
             
             # Небольшая пауза, чтобы не нагружать процессор
             time.sleep(0.1)
+    
+    def update_audio_level(self):
+        """
+        Обновляет индикатор уровня аудио
+        """
+        if not self.is_recording:
+            # Очищаем индикатор
+            self.audio_level_canvas.delete("all")
+            return
+            
+        try:
+            # Получаем текущий уровень аудио
+            level = 0
+            if hasattr(self.audio_capture, 'speaking'):
+                # Если речь обнаружена, показываем высокий уровень
+                if self.audio_capture.speaking:
+                    level = 80
+                else:
+                    # Если речь не обнаружена, но запись идет, показываем низкий уровень
+                    level = 20
+            
+            # Цветовая индикация
+            if level < 30:
+                color = "blue"
+            elif level < 70:
+                color = "green"
+            else:
+                color = "red"
+            
+            # Обновляем визуализацию
+            self.audio_level_canvas.delete("all")
+            self.audio_level_canvas.create_rectangle(0, 0, level, 15, fill=color, outline="")
+            
+            # Планируем следующее обновление
+            self.root.after(100, self.update_audio_level)
+            
+        except Exception as e:
+            print(f"Ошибка при обновлении индикатора аудио: {e}")
+            # Планируем следующее обновление даже при ошибке
+            self.root.after(100, self.update_audio_level)
     
     def update_transcription(self, text):
         """

@@ -40,10 +40,10 @@ class AudioCapture:
         
     def list_devices(self):
         """
-        Выводит список доступных аудио устройств
+        Выводит список доступных аудио устройств (ввода и вывода)
         
         Returns:
-            list: Список кортежей (индекс, название) устройств ввода
+            list: Список кортежей (индекс, название, тип) устройств
         """
         devices = sd.query_devices()
         audio_devices = []
@@ -54,12 +54,25 @@ class AudioCapture:
                 name = device['name']
                 # Проверяем, является ли это виртуальным микрофоном или стереомикшером
                 if "stereo mix" in name.lower() or "стереомикшер" in name.lower() or "what u hear" in name.lower():
-                    audio_devices.append((i, f"{name} (Системный звук)"))
+                    device_type = "system_sound"
+                    audio_devices.append((i, f"{name} (Системный звук)", device_type))
                     print(f"Device {i}: {name} (Системный звук)")
                 else:
-                    audio_devices.append((i, f"{name} (Микрофон)"))
+                    device_type = "microphone"
+                    audio_devices.append((i, f"{name} (Микрофон)", device_type))
                     print(f"Device {i}: {name} (Микрофон)")
                 print(f"  Input channels: {device['max_input_channels']}")
+                print(f"  Default sample rate: {device['default_samplerate']}")
+                print()
+        
+        print("\n=== УСТРОЙСТВА ВЫВОДА (ДИНАМИКИ, НАУШНИКИ) ===")
+        for i, device in enumerate(devices):
+            if device['max_output_channels'] > 0:
+                name = device['name']
+                device_type = "output"
+                audio_devices.append((i, f"{name} (Вывод)", device_type))
+                print(f"Device {i}: {name} (Вывод)")
+                print(f"  Output channels: {device['max_output_channels']}")
                 print(f"  Default sample rate: {device['default_samplerate']}")
                 print()
         
@@ -111,12 +124,13 @@ class AudioCapture:
             elif self.speaking:
                 self.current_frames.append(data)
     
-    def start_recording(self, device_index=None):
+    def start_recording(self, device_index=None, device_type=None):
         """
         Начинает запись аудио с выбранного устройства
         
         Args:
-            device_index: Индекс устройства ввода
+            device_index: Индекс устройства
+            device_type: Тип устройства ("microphone", "system_sound", "output")
         """
         if self.is_recording:
             print("Запись уже идет")
@@ -129,18 +143,50 @@ class AudioCapture:
         
         # Запускаем поток записи
         try:
-            # Обычный режим записи для всех типов устройств
-            self.stream = sd.InputStream(
-                samplerate=self.rate,
-                channels=self.channels,
-                device=device_index,
-                blocksize=self.chunk_size,
-                dtype='float32',
-                callback=self.audio_callback
-            )
+            if device_type == "output":
+                # Для устройств вывода найдем устройство Stereo Mix или аналог
+                devices = sd.query_devices()
+                stereo_mix_idx = None
                 
-            self.stream.start()
-            print(f"Запись с устройства {device_index} началась...")
+                for i, device in enumerate(devices):
+                    if device['max_input_channels'] > 0:
+                        name = device['name'].lower()
+                        if "stereo mix" in name or "стереомикшер" in name or "what u hear" in name:
+                            stereo_mix_idx = i
+                            break
+                
+                if stereo_mix_idx is not None:
+                    print(f"Найдено устройство для захвата звука системы: {devices[stereo_mix_idx]['name']}")
+                    self.stream = sd.InputStream(
+                        samplerate=self.rate,
+                        channels=self.channels,
+                        device=stereo_mix_idx,
+                        blocksize=self.chunk_size,
+                        dtype='float32',
+                        callback=self.audio_callback
+                    )
+                    self.stream.start()
+                    print(f"Запись с системного аудио через {devices[stereo_mix_idx]['name']} (индекс {stereo_mix_idx})...")
+                else:
+                    # Если Stereo Mix не найден, сообщаем о необходимости его включения
+                    raise Exception(
+                        "Не удалось найти устройство для захвата системного звука (Stereo Mix или аналоги). "
+                        "Для записи с устройств вывода необходимо включить 'Стереомикшер' в панели управления звуком "
+                        "или установить виртуальное аудиоустройство типа VB-Cable."
+                    )
+            else:
+                # Обычный режим записи для устройств ввода (микрофонов и системного звука)
+                self.stream = sd.InputStream(
+                    samplerate=self.rate,
+                    channels=self.channels,
+                    device=device_index,
+                    blocksize=self.chunk_size,
+                    dtype='float32',
+                    callback=self.audio_callback
+                )
+                    
+                self.stream.start()
+                print(f"Запись с устройства {device_index} началась...")
         except Exception as e:
             self.is_recording = False
             print(f"Ошибка при запуске записи: {e}")
@@ -211,18 +257,18 @@ if __name__ == "__main__":
     
     # Выберите нужное устройство
     print("\nВыберите устройство:")
-    for i, (device_id, name) in enumerate(devices):
-        print(f"{i}: {name}")
+    for i, (device_id, name, device_type) in enumerate(devices):
+        print(f"{i}: {name} [{device_type}]")
     
     try:
         choice = int(input("Введите номер устройства: "))
         if 0 <= choice < len(devices):
-            device_id, device_name = devices[choice]
-            print(f"Выбрано устройство: {device_name}")
+            device_id, device_name, device_type = devices[choice]
+            print(f"Выбрано устройство: {device_name} [{device_type}]")
             
             try:
                 print(f"Начинаем запись с устройства {device_name}")
-                audio_capture.start_recording(device_index=device_id)
+                audio_capture.start_recording(device_index=device_id, device_type=device_type)
                 
                 # Запустим 10-секундную запись в качестве теста
                 print("Запись будет длиться 10 секунд...")

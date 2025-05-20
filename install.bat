@@ -59,14 +59,24 @@ echo.
 echo [INFO] Checking for FFmpeg...
 where ffmpeg > nul 2>&1
 if %errorlevel% neq 0 (
-    echo [WARNING] FFmpeg not found in PATH. Whisper works best with FFmpeg installed.
-    echo [INFO] You have two options:
-    echo   1. Install FFmpeg manually (recommended):
-    echo      - Download from https://ffmpeg.org/download.html
-    echo      - Add the bin directory to your PATH
-    echo   2. Continue without FFmpeg (some features may not work optimally)
+    echo [WARNING] FFmpeg not found in PATH.
+    echo [INFO] Attempting to install ffmpeg-python package...
     
-    choice /C YN /M "Do you want to continue without installing FFmpeg"
+    pip install ffmpeg-python
+    
+    if %errorlevel% neq 0 (
+        echo [WARNING] Failed to install ffmpeg-python. This might affect audio processing.
+    ) else {
+        echo [INFO] Successfully installed ffmpeg-python package.
+    }
+    
+    echo [INFO] For best performance, you should also install the FFmpeg binary:
+    echo   1. Download from https://ffmpeg.org/download.html
+    echo   2. Add the bin directory to your PATH
+    echo   3. Alternatively, you can download automated installer from https://github.com/BtbN/FFmpeg-Builds/releases
+    
+    choice /C YNC /M "Do you want to: [Y] Continue without FFmpeg, [N] Stop to install it manually, [C] Try auto-download"
+    
     if %errorlevel% equ 2 (
         echo.
         echo [INFO] Please install FFmpeg, then run this script again.
@@ -76,10 +86,61 @@ if %errorlevel% neq 0 (
         echo.
         pause
         exit /b 1
+    ) else if %errorlevel% equ 3 (
+        echo [INFO] Attempting to download FFmpeg automatically...
+        
+        :: Create temp directory for download
+        if not exist "temp" mkdir temp
+        
+        :: Check OS architecture
+        echo [INFO] Checking system architecture...
+        if defined PROCESSOR_ARCHITEW6432 (
+            echo [INFO] Detected 64-bit OS with 32-bit process
+            set ARCH=64
+        ) else (
+            if "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
+                echo [INFO] Detected 64-bit OS
+                set ARCH=64
+            ) else (
+                echo [INFO] Detected 32-bit OS
+                set ARCH=32
+            )
+        )
+        
+        :: Download the FFmpeg build
+        if "%ARCH%"=="64" (
+            echo [INFO] Downloading 64-bit FFmpeg...
+            curl -L -o temp\ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+        ) else (
+            echo [INFO] Downloading 32-bit FFmpeg...
+            curl -L -o temp\ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win32-gpl.zip
+        )
+        
+        :: Extract the downloaded file
+        echo [INFO] Extracting FFmpeg...
+        powershell -command "Expand-Archive -Path 'temp\ffmpeg.zip' -DestinationPath 'temp' -Force"
+        
+        :: Copy ffmpeg.exe to the project directory
+        echo [INFO] Copying FFmpeg to the project directory...
+        for /d %%D in (temp\ffmpeg*) do (
+            copy "%%D\bin\ffmpeg.exe" .
+            copy "%%D\bin\ffprobe.exe" .
+        )
+        
+        :: Clean up temporary files
+        echo [INFO] Cleaning up...
+        rmdir /s /q temp
+        
+        echo [SUCCESS] FFmpeg has been installed to the project directory.
+        echo [INFO] You can now use FFmpeg for audio processing without adding it to PATH.
     )
 ) else (
     echo [INFO] FFmpeg found in PATH. Great!
 )
+echo.
+
+echo [INFO] Installing ffmpeg-python package for Python integration...
+pip install ffmpeg-python
 echo.
 
 echo [INFO] Checking for .env file...
@@ -114,6 +175,14 @@ if %errorlevel% neq 0 (
     echo [WARNING] Failed to import base libraries. Some components may not be installed.
 ) else (
     echo [SUCCESS] Base libraries installed correctly.
+)
+
+echo [INFO] Checking FFmpeg integration...
+python -c "import ffmpeg; print('Successfully imported ffmpeg-python')" 2>nul
+if %errorlevel% neq 0 (
+    echo [WARNING] Failed to import ffmpeg-python. Audio transcription might not work correctly.
+) else (
+    echo [SUCCESS] FFmpeg Python integration installed correctly.
 )
 
 echo.
