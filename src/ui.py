@@ -32,8 +32,8 @@ class AudioAssistantUI:
         # Флаги состояния
         self.is_recording = False
         self.is_processing = False
-        self.device_index = None
-        self.device_type = None
+        self.input_device_index = None
+        self.output_device_index = None
         
         # Создаем пользовательский интерфейс
         self.create_ui()
@@ -60,15 +60,30 @@ class AudioAssistantUI:
         control_frame = ttk.LabelFrame(main_frame, text="Управление", padding="5")
         control_frame.pack(fill="x", pady=(0, 5))
         
-        # Устройства ввода
-        input_frame = ttk.Frame(control_frame)
-        input_frame.pack(fill="x", pady=5)
+        # Устройства ввода/вывода
+        devices_frame = ttk.Frame(control_frame)
+        devices_frame.pack(fill="x", pady=5)
         
-        ttk.Label(input_frame, text="Устройство:", font=default_font).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.device_combobox = ttk.Combobox(input_frame, width=40, font=default_font)
-        self.device_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        # Устройства ввода (микрофоны)
+        input_frame = ttk.LabelFrame(devices_frame, text="Устройство ввода (микрофон)")
+        input_frame.grid(row=0, column=0, pady=5, padx=5, sticky="ew")
         
-        ttk.Button(input_frame, text="Обновить", command=self.refresh_devices, width=10).grid(row=0, column=2, padx=5, pady=5)
+        self.input_device_combobox = ttk.Combobox(input_frame, width=40, font=default_font)
+        self.input_device_combobox.pack(fill="x", expand=True, padx=5, pady=5)
+        
+        # Устройства вывода (наушники, колонки)
+        output_frame = ttk.LabelFrame(devices_frame, text="Устройство вывода (наушники, колонки)")
+        output_frame.grid(row=0, column=1, pady=5, padx=5, sticky="ew")
+        
+        self.output_device_combobox = ttk.Combobox(output_frame, width=40, font=default_font)
+        self.output_device_combobox.pack(fill="x", expand=True, padx=5, pady=5)
+        
+        # Кнопка обновления списка устройств
+        refresh_frame = ttk.Frame(devices_frame)
+        refresh_frame.grid(row=1, column=0, columnspan=2, pady=5, sticky="ew")
+        
+        ttk.Button(refresh_frame, text="Обновить список устройств", 
+                  command=self.refresh_devices, width=25).pack(pady=5)
         
         # Настройки распознавания
         settings_frame = ttk.Frame(control_frame)
@@ -164,33 +179,44 @@ class AudioAssistantUI:
     
     def refresh_devices(self):
         """
-        Обновляет список доступных аудио устройств
+        Обновляет списки доступных аудио устройств
         """
         if not self.audio_capture:
             return
             
-        # Получаем список устройств
-        devices = self.audio_capture.list_devices()
+        # Получаем списки устройств
+        input_devices = self.audio_capture.list_input_devices()
+        output_devices = self.audio_capture.list_output_devices()
         
-        # Обновляем выпадающий список, добавив цветовую маркировку для разных типов устройств
-        self.device_combobox['values'] = []
-        device_strings = []
+        # Обновляем выпадающий список устройств ввода
+        self.input_device_combobox['values'] = []
+        input_device_strings = []
         
-        for i, (device_id, name, device_type) in enumerate(devices):
-            if device_type == "microphone":
-                # Микрофоны
-                device_strings.append(f"{i}: {name}")
-            elif device_type == "system_sound":
-                # Системный звук (Stereo Mix)
-                device_strings.append(f"{i}: {name}")
-            elif device_type == "output":
-                # Устройства вывода
-                device_strings.append(f"{i}: {name}")
+        for i, (device_id, name, device_type) in enumerate(input_devices):
+            if device_type in ["microphone", "system_sound"]:
+                # Микрофоны и системный звук
+                input_device_strings.append(f"{device_id}: {name}")
         
-        self.device_combobox['values'] = device_strings
+        self.input_device_combobox['values'] = input_device_strings
         
-        if device_strings:
-            self.device_combobox.current(0)
+        if input_device_strings:
+            self.input_device_combobox.current(0)
+        
+        # Обновляем выпадающий список устройств вывода
+        self.output_device_combobox['values'] = []
+        output_device_strings = []
+        
+        for i, (device_id, name, device_type) in enumerate(output_devices):
+            if device_type == "output":
+                output_device_strings.append(f"{device_id}: {name}")
+        
+        self.output_device_combobox['values'] = output_device_strings
+        
+        if output_device_strings:
+            self.output_device_combobox.current(0)
+            
+        # Отображаем информацию о статусе
+        self.status_var.set(f"Найдено: {len(input_device_strings)} устройств ввода, {len(output_device_strings)} устройств вывода")
     
     def toggle_recording(self):
         """
@@ -209,49 +235,30 @@ class AudioAssistantUI:
             messagebox.showerror("Ошибка", "Не все компоненты инициализированы")
             return
         
-        # Получаем индекс выбранного устройства
+        # Получаем индексы выбранных устройств
         try:
-            device_str = self.device_combobox.get()
-            # Разбираем строку устройства
-            device_id_str = device_str.split(":")[0].strip()
-            device_index = int(device_id_str)  # Получаем числовой индекс
+            # Устройство ввода
+            input_device_str = self.input_device_combobox.get()
+            input_device_id_str = input_device_str.split(":")[0].strip()
+            input_device_index = int(input_device_id_str)
             
-            # Получаем полную информацию об устройстве
-            devices = self.audio_capture.list_devices()
-            device_info = None
+            # Устройство вывода
+            output_device_str = self.output_device_combobox.get()
+            output_device_id_str = output_device_str.split(":")[0].strip()
+            output_device_index = int(output_device_id_str)
             
-            for d_id, d_name, d_type in devices:
-                if d_id == device_index:
-                    device_info = (d_id, d_name, d_type)
-                    break
-            
-            if not device_info:
-                messagebox.showerror("Ошибка", f"Не удалось найти информацию об устройстве {device_index}")
-                return
-                
-            device_id, device_name, device_type = device_info
-            
-            # Определяем тип устройства для статусной строки
-            device_display_type = "устройства"
-            if device_type == "microphone":
-                device_display_type = "микрофона"
-            elif device_type == "system_sound":
-                device_display_type = "системного звука"
-            elif device_type == "output":
-                device_display_type = "устройства вывода"
-            
-            # Сохраняем выбранное устройство
-            self.device_index = device_id
-            self.device_type = device_type
+            # Сохраняем индексы устройств
+            self.input_device_index = input_device_index
+            self.output_device_index = output_device_index
                 
         except (ValueError, IndexError) as e:
-            messagebox.showerror("Ошибка", f"Выберите корректное устройство: {e}")
+            messagebox.showerror("Ошибка", f"Выберите корректные устройства: {e}")
             return
         
         # Проверяем модель распознавания
         current_model = self.model_combobox.get()
         
-        # Исправлено: проверка атрибутов модели Whisper
+        # Проверка атрибутов модели Whisper
         try:
             # Получим имя модели более безопасным способом
             model_name = getattr(self.speech_recognizer, 'model_name', None)
@@ -274,7 +281,11 @@ class AudioAssistantUI:
         
         # Запускаем запись
         try:
-            self.audio_capture.start_recording(device_index=self.device_index, device_type=self.device_type)
+            # Запускаем запись с обоих устройств
+            self.audio_capture.start_recording_with_both(
+                input_device_index=self.input_device_index, 
+                output_device_index=self.output_device_index
+            )
             self.is_recording = True
             
             # Запускаем обработку в отдельном потоке
@@ -288,7 +299,7 @@ class AudioAssistantUI:
             
             # Обновляем UI
             self.start_button.config(text="Остановить запись")
-            self.status_var.set(f"Запись и обработка аудио с {device_display_type} ({device_name})...")
+            self.status_var.set(f"Запись и обработка аудио с микрофона и наушников...")
         except Exception as e:
             messagebox.showerror("Ошибка записи", f"Не удалось начать запись: {e}")
             self.is_recording = False
@@ -614,7 +625,7 @@ if __name__ == "__main__":
                 
                 def add_message(self, content, role="user"):
                     self.conversation_history.append({"role": role, "content": content})
-                
+
                 def get_response(self, prompt=None):
                     if prompt:
                         self.add_message(prompt)

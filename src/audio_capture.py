@@ -77,6 +77,58 @@ class AudioCapture:
                 print()
         
         return audio_devices
+        
+    def list_input_devices(self):
+        """
+        Выводит список доступных аудио устройств ввода (микрофоны)
+        
+        Returns:
+            list: Список кортежей (индекс, название, тип) устройств ввода
+        """
+        devices = sd.query_devices()
+        input_devices = []
+        
+        print("\n=== УСТРОЙСТВА ВВОДА (МИКРОФОНЫ) ===")
+        for i, device in enumerate(devices):
+            if device['max_input_channels'] > 0:
+                name = device['name']
+                # Проверяем, является ли это виртуальным микрофоном или стереомикшером
+                if "stereo mix" in name.lower() or "стереомикшер" in name.lower() or "what u hear" in name.lower():
+                    device_type = "system_sound"
+                    input_devices.append((i, f"{name} (Системный звук)", device_type))
+                    print(f"Device {i}: {name} (Системный звук)")
+                else:
+                    device_type = "microphone"
+                    input_devices.append((i, f"{name} (Микрофон)", device_type))
+                    print(f"Device {i}: {name} (Микрофон)")
+                print(f"  Input channels: {device['max_input_channels']}")
+                print(f"  Default sample rate: {device['default_samplerate']}")
+                print()
+        
+        return input_devices
+
+    def list_output_devices(self):
+        """
+        Выводит список доступных аудио устройств вывода (динамики, наушники)
+        
+        Returns:
+            list: Список кортежей (индекс, название, тип) устройств вывода
+        """
+        devices = sd.query_devices()
+        output_devices = []
+        
+        print("\n=== УСТРОЙСТВА ВЫВОДА (ДИНАМИКИ, НАУШНИКИ) ===")
+        for i, device in enumerate(devices):
+            if device['max_output_channels'] > 0:
+                name = device['name']
+                device_type = "output"
+                output_devices.append((i, f"{name} (Вывод)", device_type))
+                print(f"Device {i}: {name} (Вывод)")
+                print(f"  Output channels: {device['max_output_channels']}")
+                print(f"  Default sample rate: {device['default_samplerate']}")
+                print()
+        
+        return output_devices
     
     def audio_callback(self, indata, frames, time, status):
         """
@@ -192,6 +244,63 @@ class AudioCapture:
             print(f"Ошибка при запуске записи: {e}")
             raise
     
+    def start_recording_with_both(self, input_device_index=None, output_device_index=None):
+        """
+        Начинает запись аудио с микрофона и одновременно с выходного устройства через Stereo Mix.
+        
+        Args:
+            input_device_index: Индекс устройства ввода (микрофон)
+            output_device_index: Индекс устройства вывода (наушники/колонки)
+        """
+        if self.is_recording:
+            print("Запись уже идет")
+            return
+            
+        self.is_recording = True
+        self.current_frames = []
+        self.silent_chunks = 0
+        self.speaking = False
+        
+        # Ищем Stereo Mix для захвата звука с устройств вывода
+        stereo_mix_idx = None
+        devices = sd.query_devices()
+        
+        for i, device in enumerate(devices):
+            if device['max_input_channels'] > 0:
+                name = device['name'].lower()
+                if "stereo mix" in name or "стереомикшер" in name or "what u hear" in name:
+                    stereo_mix_idx = i
+                    break
+        
+        # Запускаем поток записи с выбранного микрофона
+        try:
+            self.stream = sd.InputStream(
+                samplerate=self.rate,
+                channels=self.channels,
+                device=input_device_index,
+                blocksize=self.chunk_size,
+                dtype='float32',
+                callback=self.audio_callback
+            )
+            
+            self.stream.start()
+            
+            # Если нашли Stereo Mix, информируем что он будет использоваться для записи звука системы
+            if stereo_mix_idx is not None:
+                print(f"Запись с микрофона (индекс {input_device_index}) включена.")
+                print(f"Для записи звука с наушников ({output_device_index}) будет использовано устройство {devices[stereo_mix_idx]['name']} (индекс {stereo_mix_idx}).")
+                print("Примечание: звук системы будет захвачен через Stereo Mix, независимо от выбранного выходного устройства.")
+            else:
+                # Если Stereo Mix не найден, информируем что запись с выходного устройства недоступна
+                print(f"Запись с микрофона (индекс {input_device_index}) включена.")
+                print("Запись с выходного устройства недоступна, так как не найден Stereo Mix или аналог.")
+                print("Для включения записи с выходных устройств активируйте 'Стереомикшер' в панели управления звуком Windows.")
+                
+        except Exception as e:
+            self.is_recording = False
+            print(f"Ошибка при запуске записи: {e}")
+            raise
+
     def stop_recording(self):
         """
         Останавливает запись аудио
@@ -249,56 +358,72 @@ if __name__ == "__main__":
     audio_capture = AudioCapture()
     
     print("Доступные аудио устройства:")
-    devices = audio_capture.list_devices()
+    input_devices = audio_capture.list_input_devices()
+    output_devices = audio_capture.list_output_devices()
     
-    if not devices:
+    if not input_devices:
         print("Не найдено устройств ввода аудио!")
         exit(1)
     
-    # Выберите нужное устройство
-    print("\nВыберите устройство:")
-    for i, (device_id, name, device_type) in enumerate(devices):
+    # Выберите устройство ввода (микрофон)
+    print("\nВыберите устройство ввода (микрофон):")
+    for i, (device_id, name, device_type) in enumerate(input_devices):
         print(f"{i}: {name} [{device_type}]")
     
-    try:
-        choice = int(input("Введите номер устройства: "))
-        if 0 <= choice < len(devices):
-            device_id, device_name, device_type = devices[choice]
-            print(f"Выбрано устройство: {device_name} [{device_type}]")
-            
-            try:
-                print(f"Начинаем запись с устройства {device_name}")
-                audio_capture.start_recording(device_index=device_id, device_type=device_type)
-                
-                # Запустим 10-секундную запись в качестве теста
-                print("Запись будет длиться 10 секунд...")
-                time.sleep(10)
-                
-                # Останавливаем запись
-                audio_capture.stop_recording()
-                
-                # Получаем и сохраняем все сегменты аудио
-                segment_idx = 0
-                while True:
-                    frames = audio_capture.get_next_audio_segment()
-                    if frames is None:
-                        break
-                    
-                    audio_capture.save_audio(frames, f"audio_segment_{segment_idx}.wav")
-                    segment_idx += 1
-                
-                if segment_idx == 0:
-                    print("Не было обнаружено речи.")
-                else:
-                    print(f"Сохранено {segment_idx} аудио сегментов.")
-            except Exception as e:
-                print(f"Ошибка при записи: {e}")
-                
+    input_choice = int(input("Введите номер устройства ввода: "))
+    if 0 <= input_choice < len(input_devices):
+        input_device_id, input_device_name, input_device_type = input_devices[input_choice]
+        print(f"Выбрано устройство ввода: {input_device_name} [{input_device_type}]")
+    else:
+        print("Неверный номер устройства ввода.")
+        exit(1)
+    
+    # Выберите устройство вывода (наушники, колонки)
+    if output_devices:
+        print("\nВыберите устройство вывода (наушники, колонки):")
+        for i, (device_id, name, device_type) in enumerate(output_devices):
+            print(f"{i}: {name} [{device_type}]")
+        
+        output_choice = int(input("Введите номер устройства вывода: "))
+        if 0 <= output_choice < len(output_devices):
+            output_device_id, output_device_name, output_device_type = output_devices[output_choice]
+            print(f"Выбрано устройство вывода: {output_device_name} [{output_device_type}]")
         else:
-            print("Неверный номер устройства.")
-    except ValueError:
-        print("Неверный ввод.")
-    except KeyboardInterrupt:
-        print("Запись прервана пользователем")
+            print("Неверный номер устройства вывода.")
+            exit(1)
+    else:
+        print("Устройства вывода не найдены.")
+        output_device_id = None
+    
+    try:
+        print(f"Начинаем запись с микрофона {input_device_name} и вывода звука...")
+        audio_capture.start_recording_with_both(
+            input_device_index=input_device_id, 
+            output_device_index=output_device_id
+        )
+        
+        # Запустим 10-секундную запись в качестве теста
+        print("Запись будет длиться 10 секунд...")
+        time.sleep(10)
+        
+        # Останавливаем запись
+        audio_capture.stop_recording()
+        
+        # Получаем и сохраняем все сегменты аудио
+        segment_idx = 0
+        while True:
+            frames = audio_capture.get_next_audio_segment()
+            if frames is None:
+                break
+            
+            audio_capture.save_audio(frames, f"audio_segment_{segment_idx}.wav")
+            segment_idx += 1
+        
+        if segment_idx == 0:
+            print("Не было обнаружено речи.")
+        else:
+            print(f"Сохранено {segment_idx} аудио сегментов.")
+    except Exception as e:
+        print(f"Ошибка при записи: {e}")
     finally:
         audio_capture.close()
