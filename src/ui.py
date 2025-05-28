@@ -10,7 +10,8 @@ class AudioAssistantUI:
     """
     Класс для создания пользовательского интерфейса аудио-ассистента
     """
-    def __init__(self, root, audio_capture, speech_recognizer, chatgpt_client):
+    def __init__(self, root, audio_capture=None, speech_recognizer=None, chatgpt_client=None,
+                 realtime_processor=None, realtime_assistant=None):
         """
         Инициализирует пользовательский интерфейс
         
@@ -19,6 +20,8 @@ class AudioAssistantUI:
             audio_capture: Экземпляр класса AudioCapture
             speech_recognizer: Экземпляр класса SpeechRecognizer
             chatgpt_client: Экземпляр класса ChatGPTClient
+            realtime_processor: Экземпляр класса RealTimeAudioProcessor
+            realtime_assistant: Экземпляр класса RealtimeMeetingAssistant
         """
         self.root = root
         self.root.title(UI_SETTINGS['window_title'])
@@ -28,12 +31,15 @@ class AudioAssistantUI:
         self.audio_capture = audio_capture
         self.speech_recognizer = speech_recognizer
         self.chatgpt_client = chatgpt_client
+        self.realtime_processor = realtime_processor
+        self.realtime_assistant = realtime_assistant
         
         # Флаги состояния
         self.is_recording = False
         self.is_processing = False
         self.input_device_index = None
         self.output_device_index = None
+        self.assistant_active = False
         
         # Создаем пользовательский интерфейс
         self.create_ui()
@@ -84,6 +90,28 @@ class AudioAssistantUI:
         
         ttk.Button(refresh_frame, text="Обновить список устройств", 
                   command=self.refresh_devices, width=25).pack(pady=5)
+        
+        # Режим работы
+        mode_frame = ttk.Frame(control_frame)
+        mode_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(mode_frame, text="Режим записи:", font=default_font).pack(side="left", padx=5)
+        
+        # Переключатель режима
+        self.mode_var = tk.StringVar(value="enhanced")
+        ttk.Radiobutton(mode_frame, text="Улучшенный (Windows WASAPI)", variable=self.mode_var, 
+                       value="enhanced").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Стандартный (Stereo Mix)", variable=self.mode_var, 
+                       value="standard").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Прямой захват звука", variable=self.mode_var, 
+                      value="advanced").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Универсальный режим", variable=self.mode_var, 
+                      value="universal").pack(side="left", padx=5)
+        
+        # Кнопка информации о режимах
+        info_button = ttk.Button(mode_frame, text="?", width=2, 
+                                command=self.show_recording_info)
+        info_button.pack(side="left", padx=5)
         
         # Настройки распознавания
         settings_frame = ttk.Frame(control_frame)
@@ -176,6 +204,22 @@ class AudioAssistantUI:
         self.status_bar = ttk.Label(status_frame, textvariable=self.status_var, 
                                    relief=tk.SUNKEN, anchor=tk.W, font=("Arial", 9))
         self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+    def show_recording_info(self):
+        """
+        Показывает информацию о режимах записи
+        """
+        messagebox.showinfo(
+            "Режимы записи",
+            "Улучшенный режим (Windows WASAPI): Использует нативные Windows API для захвата системного звука. "
+            "Обеспечивает наилучшее качество и надежность на Windows 10/11. Рекомендуется для большинства пользователей.\n\n"
+            "Стандартный режим: Использует микрофон и Stereo Mix (если доступен) для записи.\n\n"
+            "Прямой захват звука: Пытается напрямую захватывать звук с устройства вывода. "
+            "Работает не на всех системах и может требовать дополнительных настроек. "
+            "Рекомендуется, если Stereo Mix недоступен.\n\n"
+            "Универсальный режим: Автоматически выбирает оптимальный способ захвата звука "
+            "для вашей системы. Пробует разные методы, включая продвинутые техники для захвата системного звука."
+        )
     
     def refresh_devices(self):
         """
@@ -226,10 +270,10 @@ class AudioAssistantUI:
             self.start_recording()
         else:
             self.stop_recording()
-    
+
     def start_recording(self):
         """
-        Запускает запись и обработку аудио
+        Запускает запись и обработку аудио с использованием выбранного режима
         """
         if not self.audio_capture or not self.speech_recognizer or not self.chatgpt_client:
             messagebox.showerror("Ошибка", "Не все компоненты инициализированы")
@@ -279,13 +323,40 @@ class AudioAssistantUI:
         if chatgpt_model != self.chatgpt_client.model:
             self.chatgpt_client.model = chatgpt_model
         
-        # Запускаем запись
+        # Запускаем запись в зависимости от выбранного режима
         try:
-            # Запускаем запись с обоих устройств
-            self.audio_capture.start_recording_with_both(
-                input_device_index=self.input_device_index, 
-                output_device_index=self.output_device_index
-            )
+            # Получаем режим записи
+            mode = self.mode_var.get()
+            
+            if mode == "enhanced":
+                # Используем улучшенный режим с Windows WASAPI
+                self.audio_capture.start_enhanced_recording(
+                    input_device_index=self.input_device_index, 
+                    output_device_index=self.output_device_index
+                )
+                mode_text = "с Windows WASAPI"
+            elif mode == "advanced":
+                # Используем прямой захват звука
+                self.audio_capture.start_dual_recording(
+                    input_device_index=self.input_device_index, 
+                    output_device_index=self.output_device_index
+                )
+                mode_text = "с прямым захватом звука"
+            elif mode == "universal":
+                # Используем универсальный режим
+                self.audio_capture.start_universal_recording(
+                    input_device_index=self.input_device_index, 
+                    output_device_index=self.output_device_index
+                )
+                mode_text = "с универсальным захватом звука"
+            else:
+                # Используем стандартный режим (через Stereo Mix)
+                self.audio_capture.start_recording_with_both(
+                    input_device_index=self.input_device_index, 
+                    output_device_index=self.output_device_index
+                )
+                mode_text = "стандартный"
+            
             self.is_recording = True
             
             # Запускаем обработку в отдельном потоке
@@ -299,16 +370,32 @@ class AudioAssistantUI:
             
             # Обновляем UI
             self.start_button.config(text="Остановить запись")
-            self.status_var.set(f"Запись и обработка аудио с микрофона и наушников...")
+            self.status_var.set(f"Запись и обработка аудио (режим {mode_text})...")
         except Exception as e:
             messagebox.showerror("Ошибка записи", f"Не удалось начать запись: {e}")
             self.is_recording = False
             self.is_processing = False
+
+    def show_error(self, error_message):
+        """
+        Отображает сообщение об ошибке
+        
+        Args:
+            error_message (str): Текст сообщения об ошибке
+        """
+        messagebox.showerror("Ошибка", error_message)
+        self.status_var.set(f"Ошибка: {error_message}")
     
     def stop_recording(self):
         """
         Останавливает запись и обработку аудио
         """
+        # Если используется ассистент реального времени
+        if self.assistant_active and self.realtime_assistant:
+            self.realtime_assistant.stop()
+            self.assistant_active = False
+        
+        # Стандартная остановка
         if self.audio_capture:
             self.audio_capture.stop_recording()
         
@@ -322,44 +409,11 @@ class AudioAssistantUI:
         # Обновляем UI
         self.start_button.config(text="Начать запись")
         self.status_var.set("Запись остановлена")
-    
-    def process_audio(self):
-        """
-        Обрабатывает аудио в отдельном потоке
-        """
-        while self.is_processing:
-            # Получаем следующий сегмент аудио
-            frames = self.audio_capture.get_next_audio_segment()
-            
-            if frames:
-                # Преобразуем фреймы в текст
-                self.status_var.set("Распознавание речи...")
-                language = self.language_combobox.get()
-                if language == "auto":
-                    language = None
-                    
-                transcription = self.speech_recognizer.transcribe_audio_data(frames, language=language)
-                
-                if transcription:
-                    # Выводим текст в UI
-                    self.update_transcription(transcription)
-                    
-                    # Отправляем текст в ChatGPT
-                    self.status_var.set("Получение ответа от ChatGPT...")
-                    response = self.chatgpt_client.get_response(transcription)
-                    
-                    # Выводим ответ в UI
-                    self.update_chat(response)
-                    
-                    # Обновляем статус
-                    self.status_var.set("Готов к обработке следующего фрагмента")
-                
-                # Сохраняем аудио для отладки (опционально)
-                # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                # self.audio_capture.save_audio(frames, f"audio_{timestamp}.wav")
-            
-            # Небольшая пауза, чтобы не нагружать процессор
-            time.sleep(0.1)
+        
+        # Если использовался ассистент, предлагаем сгенерировать саммари
+        if self.assistant_active and self.realtime_assistant:
+            if messagebox.askyesno("Саммари встречи", "Хотите сгенерировать саммари встречи?"):
+                self.generate_summary_with_assistant()
     
     def update_audio_level(self):
         """
@@ -381,6 +435,7 @@ class AudioAssistantUI:
                     # Если речь не обнаружена, но запись идет, показываем низкий уровень
                     level = 20
             
+            # Отображаем разные цвета для разных устройств
             # Цветовая индикация
             if level < 30:
                 color = "blue"
@@ -393,6 +448,13 @@ class AudioAssistantUI:
             self.audio_level_canvas.delete("all")
             self.audio_level_canvas.create_rectangle(0, 0, level, 15, fill=color, outline="")
             
+            # При использовании двойного захвата, можем показать дополнительный индикатор
+            mode = getattr(self, 'mode_var', None)
+            if mode and mode.get() == "advanced" and hasattr(self.audio_capture, 'output_frames') and self.audio_capture.output_frames:
+                # Отображаем индикатор для системного звука на том же холсте, но меньшего размера
+                system_level = min(100, len(self.audio_capture.output_frames) * 5)  # Простая визуализация
+                self.audio_level_canvas.create_rectangle(0, 12, system_level, 15, fill="orange", outline="")
+            
             # Планируем следующее обновление
             self.root.after(100, self.update_audio_level)
             
@@ -400,7 +462,7 @@ class AudioAssistantUI:
             print(f"Ошибка при обновлении индикатора аудио: {e}")
             # Планируем следующее обновление даже при ошибке
             self.root.after(100, self.update_audio_level)
-    
+            
     def update_transcription(self, text):
         """
         Обновляет текст в поле распознавания
@@ -576,6 +638,67 @@ class AudioAssistantUI:
         
         self.status_var.set("История разговора очищена")
     
+    def generate_summary_with_assistant(self):
+        """
+        Генерирует саммари встречи, используя ассистента реального времени
+        """
+        if not self.realtime_assistant:
+            # Если ассистент не инициализирован, используем стандартный метод
+            self.generate_summary()
+            return
+            
+        self.status_var.set("Генерация саммари встречи через ассистента...")
+        self.root.update()
+        
+        # Генерируем саммари с помощью ассистента реального времени
+        summary = self.realtime_assistant.generate_meeting_summary()
+        
+        # Отображаем саммари
+        self.summary_text.configure(state="normal")
+        self.summary_text.delete(1.0, tk.END)
+        self.summary_text.insert(tk.END, summary)
+        self.summary_text.configure(state="disabled")
+        
+        self.status_var.set("Саммари встречи сгенерировано через ассистента")
+    
+    def process_audio(self):
+        """
+        Обрабатывает аудио в отдельном потоке
+        """
+        while self.is_processing:
+            # Получаем следующий сегмент аудио
+            frames = self.audio_capture.get_next_audio_segment()
+            
+            if frames:
+                # Преобразуем фреймы в текст
+                self.status_var.set("Распознавание речи...")
+                language = self.language_combobox.get()
+                if language == "auto":
+                    language = None
+                    
+                transcription = self.speech_recognizer.transcribe_audio_data(frames, language=language)
+                
+                if transcription:
+                    # Выводим текст в UI
+                    self.update_transcription(transcription)
+                    
+                    # Отправляем текст в ChatGPT
+                    self.status_var.set("Получение ответа от ChatGPT...")
+                    response = self.chatgpt_client.get_response(transcription)
+                    
+                    # Выводим ответ в UI
+                    self.update_chat(response)
+                    
+                    # Обновляем статус
+                    self.status_var.set("Готов к обработке следующего фрагмента")
+                
+                # Сохраняем аудио для отладки (опционально)
+                # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                # self.audio_capture.save_audio(frames, f"audio_{timestamp}.wav")
+            
+            # Небольшая пауза, чтобы не нагружать процессор
+            time.sleep(0.1)
+    
     def on_closing(self):
         """
         Обработчик закрытия окна
@@ -625,7 +748,7 @@ if __name__ == "__main__":
                 
                 def add_message(self, content, role="user"):
                     self.conversation_history.append({"role": role, "content": content})
-
+                
                 def get_response(self, prompt=None):
                     if prompt:
                         self.add_message(prompt)

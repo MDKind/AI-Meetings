@@ -71,3 +71,11 @@ __pycache__/
 .coverage
 htmlcov/
 .tox/
+
+# Временные файлы разработки
+_backup/
+backup/
+
+# Тестовые записи
+test_recording_*.wav
+debug_recording_*.wav

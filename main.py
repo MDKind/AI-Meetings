@@ -100,11 +100,25 @@ def main():
         
         # Создаем интерфейс
         from src.ui import AudioAssistantUI
-        ui = AudioAssistantUI(app_root, audio_capture, speech_recognizer, chatgpt_client)
+        from src.realtime_meeting_assistant import RealtimeMeetingAssistant
         
-        # Добавляем новые компоненты в UI
-        ui.realtime_processor = realtime_processor
-        ui.meeting_summarizer = meeting_summarizer
+        # Создаем ассистента для встреч
+        realtime_assistant = RealtimeMeetingAssistant(
+            audio_capture=audio_capture,
+            speech_recognizer=speech_recognizer,
+            chatgpt_client=chatgpt_client,
+            meeting_summarizer=meeting_summarizer
+        )
+        
+        # Создаем UI
+        ui = AudioAssistantUI(
+            app_root,
+            audio_capture=audio_capture,
+            speech_recognizer=speech_recognizer, 
+            chatgpt_client=chatgpt_client,
+            realtime_processor=realtime_processor,
+            realtime_assistant=realtime_assistant
+        )
         
         # Запускаем главный цикл
         app_root.mainloop()

@@ -5,7 +5,21 @@ import time
 import numpy as np
 from queue import Queue
 import os
+import platform
 from utils.config import AUDIO_SETTINGS
+from src.system_audio_capture import SystemAudioCapture
+from src.audio_synchronizer import AudioSynchronizer, EnhancedAudioProcessor
+
+# Windows-specific imports
+if platform.system() == 'Windows':
+    try:
+        from src.windows_audio_capture import WindowsAudioCapture
+        WINDOWS_AUDIO_AVAILABLE = True
+    except ImportError as e:
+        print(f"Windows audio capture not available: {e}")
+        WINDOWS_AUDIO_AVAILABLE = False
+else:
+    WINDOWS_AUDIO_AVAILABLE = False
 
 class AudioCapture:
     """
@@ -34,9 +48,34 @@ class AudioCapture:
         self.silence_threshold = silence_threshold
         self.silence_duration = AUDIO_SETTINGS['silence_duration']
         self.stream = None
+        self.streams = []
         self.current_frames = []
+        self.mic_frames = []
+        self.output_frames = []
         self.silent_chunks = 0
         self.speaking = False
+        
+        # Windows-specific audio capture
+        self.windows_capture = None
+        if WINDOWS_AUDIO_AVAILABLE:
+            try:
+                self.windows_capture = WindowsAudioCapture(
+                    sample_rate=self.rate,
+                    channels=self.channels,
+                    chunk_size=self.chunk_size
+                )
+                print("Windows native audio capture available")
+            except Exception as e:
+                print(f"Failed to initialize Windows audio capture: {e}")
+                self.windows_capture = None
+        
+        # Инициализируем синхронизатор и процессор
+        self.audio_sync = AudioSynchronizer(
+            sample_rate=self.rate,
+            channels=self.channels
+        )
+        self.audio_processor = EnhancedAudioProcessor(sample_rate=self.rate)
+        self.use_synchronizer = False
         
     def list_devices(self):
         """
@@ -301,6 +340,262 @@ class AudioCapture:
             print(f"Ошибка при запуске записи: {e}")
             raise
 
+    def start_dual_recording(self, input_device_index=None, output_device_index=None):
+        """
+        Начинает запись аудио одновременно с микрофона и программно с устройства вывода
+        
+        Args:
+            input_device_index: Индекс устройства ввода (микрофон)
+            output_device_index: Индекс устройства вывода (наушники/колонки)
+        """
+        if self.is_recording:
+            print("Запись уже идет")
+            return
+            
+        self.is_recording = True
+        self.current_frames = []
+        self.mic_frames = []
+        self.output_frames = []
+        self.silent_chunks = 0
+        self.speaking = False
+        
+        # Для хранения потоков
+        self.streams = []
+        
+        try:
+            # 1. Создаем поток для записи с микрофона
+            mic_stream = sd.InputStream(
+                samplerate=self.rate,
+                channels=self.channels,
+                device=input_device_index,
+                blocksize=self.chunk_size,
+                dtype='float32',
+                callback=self.mic_callback
+            )
+            
+            # Добавляем микрофонный поток
+            self.streams.append(mic_stream)
+            mic_stream.start()
+            print(f"Запись с микрофона (индекс {input_device_index}) началась")
+            
+            # 2. Ищем Stereo Mix или аналог для захвата звука с устройств вывода
+            stereo_mix_idx = None
+            devices = sd.query_devices()
+            
+            for i, device in enumerate(devices):
+                if device['max_input_channels'] > 0:
+                    name = device['name'].lower()
+                    if "stereo mix" in name or "стереомикшер" in name or "what u hear" in name:
+                        stereo_mix_idx = i
+                        break
+            
+            if stereo_mix_idx is not None:
+                # Создаем поток для Stereo Mix
+                output_stream = sd.InputStream(
+                    samplerate=self.rate,
+                    channels=self.channels,
+                    device=stereo_mix_idx,
+                    blocksize=self.chunk_size,
+                    dtype='float32',
+                    callback=self.output_callback
+                )
+                
+                self.streams.append(output_stream)
+                output_stream.start()
+                print(f"Запись с системного звука через Stereo Mix (индекс {stereo_mix_idx}) началась")
+                print("Звук с микрофона и системы будет смешан")
+            else:
+                # 3. Если Stereo Mix не найден, пробуем прямую запись с устройства вывода
+                try:
+                    # На разных платформах параметры могут отличаться
+                    output_params = {}
+                    
+                    # Проверка ОС
+                    import platform
+                    system = platform.system()
+                    
+                    if system == "Windows":
+                        # На Windows пробуем использовать параметр для loopback
+                        # Разные версии sounddevice могут иметь разные параметры
+                        
+                        # Проверим версию sounddevice
+                        sd_version = tuple(map(int, sd.__version__.split('.')[:2]))
+                        
+                        if sd_version >= (0, 4):
+                            # Для новых версий (от 0.4.x) используем extra_settings
+                            output_params = {
+                                'extra_settings': {
+                                    'loopback': True
+                                }
+                            }
+                        else:
+                            # Для старых версий может работать прямой параметр wasapi
+                            output_params = {
+                                'wasapi': True,
+                                'loopback': True
+                            }
+                    
+                    # Создаем поток для устройства вывода с дополнительными параметрами
+                    # Пробуем несколько подходов для включения loopback режима
+                    loopback_methods = [
+                        # Метод 1: современный подход с extra_settings
+                        {'extra_settings': {'loopback': True}},
+                        # Метод 2: прямые параметры (старые версии)
+                        {'wasapi': True, 'loopback': True},
+                        # Метод 3: только loopback (встречается в некоторых версиях)
+                        {'loopback': True}
+                    ]
+                    
+                    loopback_success = False
+                    last_error = None
+                    
+                    # Пробуем разные методы
+                    for method_params in loopback_methods:
+                        try:
+                            print(f"Попытка использования loopback с параметрами: {method_params}")
+                            output_stream = sd.InputStream(
+                                samplerate=self.rate,
+                                channels=self.channels,
+                                device=output_device_index,
+                                blocksize=self.chunk_size,
+                                dtype='float32',
+                                callback=self.output_callback,
+                                **method_params
+                            )
+                            
+                            self.streams.append(output_stream)
+                            output_stream.start()
+                            print(f"Запись с устройства вывода (индекс {output_device_index}) началась в режиме loopback")
+                            print("Звук с микрофона и устройства вывода будет смешан")
+                            loopback_success = True
+                            break  # Успешно нашли работающий метод
+                        except Exception as e:
+                            last_error = e
+                            print(f"Метод не сработал: {e}")
+                    
+                    if not loopback_success:
+                        print(f"Все методы записи в режиме loopback не сработали. Последняя ошибка: {last_error}")
+                        print("Запись будет производиться только с микрофона")
+                        print("Для записи системного звука рекомендуется включить Stereo Mix в настройках Windows")
+                        
+                except Exception as e:
+                    print(f"Ошибка при попытке настройки записи с устройства вывода: {e}")
+                    print("Запись будет производиться только с микрофона")
+            
+        except Exception as e:
+            self.is_recording = False
+            
+            # Закрываем открытые потоки
+            for stream in self.streams:
+                try:
+                    stream.stop()
+                    stream.close()
+                except:
+                    pass
+            
+            self.streams = []
+            print(f"Ошибка при запуске записи: {e}")
+            raise
+    
+    def mic_callback(self, indata, frames, time, status):
+        """
+        Callback для микрофона
+        
+        Args:
+            indata: Входящие аудиоданные
+            frames: Количество фреймов
+            time: Информация о времени
+            status: Статус аудиопотока
+        """
+        if status:
+            print(f"Статус микрофона: {status}")
+            
+        # Конвертируем в формат int16
+        audio_data = (indata * 32767).astype(np.int16)
+        
+        # Сохраняем данные микрофона
+        self.mic_frames.append(audio_data.copy())
+        
+        # Обрабатываем данные микрофона
+        self._process_audio_data(audio_data)
+    
+    def output_callback(self, indata, frames, time, status):
+        """
+        Callback для устройства вывода (системный звук)
+        
+        Args:
+            indata: Входящие аудиоданные
+            frames: Количество фреймов
+            time: Информация о времени
+            status: Статус аудиопотока
+        """
+        if status:
+            print(f"Статус системного звука: {status}")
+            
+        # Конвертируем в формат int16
+        audio_data = (indata * 32767).astype(np.int16)
+        
+        # Сохраняем данные системного звука
+        self.output_frames.append(audio_data.copy())
+        
+        # Также проверяем данные системного звука на наличие речи
+        # (но с повышенным порогом, чтобы не реагировать на фоновые звуки)
+        # Получаем байтовое представление
+        data = audio_data.tobytes()
+        
+        # Для системного звука повышаем порог, чтобы не реагировать на тихие звуки
+        higher_threshold = self.silence_threshold * 1.5
+        
+        # Проверяем уровень звука
+        volume = np.abs(audio_data).mean()
+        
+        if volume > higher_threshold and not self.speaking:
+            # Если обнаружена активность в системном звуке и еще нет записи,
+            # начинаем запись как если бы это была речь
+            self.silent_chunks = 0
+            self.speaking = True
+            print("Обнаружен значимый звук в системном аудио")
+            # Добавляем текущий фрейм
+            self.current_frames.append(data)
+    
+    def _process_audio_data(self, audio_data):
+        """
+        Обрабатывает аудио данные - обнаружение речи и добавление в очередь
+        
+        Args:
+            audio_data: Аудиоданные для обработки
+        """
+        # Получаем байтовое представление
+        data = audio_data.tobytes()
+        
+        # Проверка на тишину
+        volume = np.abs(audio_data).mean()
+        
+        if volume > self.silence_threshold:
+            self.silent_chunks = 0
+            
+            if not self.speaking:
+                self.speaking = True
+                print("Речь обнаружена")
+            
+            self.current_frames.append(data)
+        else:
+            self.silent_chunks += 1
+            
+            # Если речь закончилась и есть что обрабатывать
+            if self.speaking and self.silent_chunks > int(self.rate / self.chunk_size * self.silence_duration):
+                self.speaking = False
+                
+                if self.current_frames:
+                    # Добавляем сегмент в очередь
+                    self.frames_queue.put(self.current_frames.copy())
+                    print(f"Фрагмент речи добавлен в очередь (длина: {len(self.current_frames)} чанков)")
+                    self.current_frames = []
+            
+            # Если все еще говорят, продолжаем записывать тишину (для контекста)
+            elif self.speaking:
+                self.current_frames.append(data)
+
     def stop_recording(self):
         """
         Останавливает запись аудио
@@ -310,10 +605,36 @@ class AudioCapture:
             
         self.is_recording = False
         
-        # Останавливаем поток записи
+        # Останавливаем синхронизатор
+        if self.use_synchronizer and self.audio_sync:
+            self.audio_sync.stop()
+            self.use_synchronizer = False
+        
+        # Останавливаем Windows loopback если он активен
+        if self.windows_capture:
+            try:
+                self.windows_capture.stop_loopback_recording()
+            except Exception as e:
+                print(f"Ошибка при остановке Windows loopback: {e}")
+        
+        # Останавливаем все потоки записи
+        if hasattr(self, 'streams') and self.streams:
+            for stream in self.streams:
+                if stream:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception as e:
+                        print(f"Ошибка при остановке потока: {e}")
+            self.streams = []
+        
+        # Для обратной совместимости
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception as e:
+                print(f"Ошибка при остановке основного потока: {e}")
             self.stream = None
             
         print("Запись аудио остановлена.")
@@ -341,15 +662,423 @@ class AudioCapture:
         Returns:
             list: Список фреймов аудио или None, если очередь пуста
         """
+        # Если синхронизатор активен, получаем данные оттуда
+        if self.use_synchronizer and self.audio_sync:
+            # Получаем синхронизированное аудио
+            sync_audio = self.audio_sync.get_synchronized_audio(timeout=0.1)
+            
+            if sync_audio is not None:
+                # Применяем улучшение качества
+                processed_audio = self.audio_processor.process(sync_audio)
+                
+                # Конвертируем в int16 и возвращаем как список байтов
+                int_audio = (processed_audio * 32767).astype(np.int16)
+                return [int_audio.tobytes()]
+        
+        # Стандартный метод
         if not self.frames_queue.empty():
             return self.frames_queue.get()
         return None
     
+    def start_enhanced_recording(self, input_device_index=None, output_device_index=None):
+        """
+        Начинает улучшенную запись аудио с использованием нативных Windows API
+        когда это возможно, с откатом на универсальный метод
+        
+        Args:
+            input_device_index: Индекс устройства ввода (микрофон)
+            output_device_index: Индекс устройства вывода (наушники/колонки)
+        """
+        if self.is_recording:
+            print("Запись уже идет")
+            return
+            
+        self.is_recording = True
+        self.current_frames = []
+        self.silent_chunks = 0
+        self.speaking = False
+        self.streams = []
+        
+        # Включаем синхронизатор
+        self.use_synchronizer = True
+        self.audio_sync.reset_buffers()
+        self.audio_sync.start()
+        
+        try:
+            # 1. Запускаем запись с микрофона
+            mic_stream = sd.InputStream(
+                samplerate=self.rate,
+                channels=self.channels,
+                device=input_device_index,
+                blocksize=self.chunk_size,
+                dtype='float32',
+                callback=self._enhanced_mic_callback  # Используем улучшенный callback
+            )
+            
+            self.streams.append(mic_stream)
+            mic_stream.start()
+            print(f"Запись с микрофона (индекс {input_device_index}) началась")
+            
+            # 2. Пробуем использовать Windows native loopback если доступно
+            loopback_started = False
+            if self.windows_capture and platform.system() == 'Windows':
+                try:
+                    print("Попытка использования Windows native loopback...")
+                    self.windows_capture.start_loopback_recording()
+                    loopback_started = True
+                    
+                    # Запускаем поток для обработки loopback аудио
+                    threading.Thread(
+                        target=self._process_windows_loopback,
+                        daemon=True
+                    ).start()
+                    
+                    print("Windows native loopback запущен успешно")
+                except Exception as e:
+                    print(f"Не удалось запустить Windows loopback: {e}")
+                    loopback_started = False
+            
+            # 3. Если Windows loopback не удался, пробуем альтернативные методы
+            if not loopback_started:
+                # Используем универсальный метод захвата
+                self.system_capture = SystemAudioCapture(
+                    sample_rate=self.rate,
+                    channels=self.channels,
+                    chunk_size=self.chunk_size
+                )
+                
+                threading.Thread(
+                    target=self._capture_system_audio,
+                    args=(output_device_index,),
+                    daemon=True
+                ).start()
+                
+                print("Используется альтернативный метод захвата системного звука")
+            
+            print("Улучшенная запись звука запущена")
+            
+            # Запускаем поток для обработки синхронизированного аудио
+            threading.Thread(
+                target=self._process_synchronized_audio,
+                daemon=True
+            ).start()
+            
+        except Exception as e:
+            self.is_recording = False
+            
+            # Закрываем открытые потоки
+            for stream in self.streams:
+                try:
+                    stream.stop()
+                    stream.close()
+                except:
+                    pass
+            
+            self.streams = []
+            print(f"Ошибка при запуске записи: {e}")
+            raise
+    
+    def _enhanced_mic_callback(self, indata, frames, time, status):
+        """
+        Callback для микрофона в улучшенном режиме
+        
+        Args:
+            indata: Входящие аудиоданные
+            frames: Количество фреймов
+            time: Информация о времени
+            status: Статус аудиопотока
+        """
+        if status:
+            print(f"Статус микрофона: {status}")
+        
+        # Конвертируем в float32 для синхронизатора
+        audio_data = indata.copy()
+        
+        # Если синхронизатор активен, отправляем данные туда
+        if self.use_synchronizer:
+            self.audio_sync.add_mic_data(audio_data)
+        
+        # Также обрабатываем стандартным способом для детекции речи
+        self._process_audio_data((audio_data * 32767).astype(np.int16))
+    
+    def _process_windows_loopback(self):
+        """
+        Обрабатывает аудио данные от Windows loopback
+        """
+        print("Запущен поток обработки Windows loopback")
+        
+        while self.is_recording and self.windows_capture:
+            try:
+                # Получаем данные от loopback
+                audio_data = self.windows_capture.get_loopback_audio()
+                
+                if audio_data is not None and len(audio_data) > 0:
+                    # Если синхронизатор активен, отправляем данные туда
+                    if self.use_synchronizer:
+                        self.audio_sync.add_system_data(audio_data)
+                    else:
+                        # Обрабатываем данные обычным способом
+                        self._process_system_audio(audio_data)
+                
+                # Небольшая пауза
+                time.sleep(0.1)
+                
+            except Exception as e:
+                print(f"Ошибка при обработке Windows loopback: {e}")
+                break
+        
+        print("Поток обработки Windows loopback завершен")
+    
+    def _process_synchronized_audio(self):
+        """
+        Обрабатывает синхронизированное аудио и добавляет в очередь
+        """
+        print("Запущен поток обработки синхронизированного аудио")
+        
+        while self.is_recording and self.use_synchronizer:
+            try:
+                # Получаем синхронизированное аудио
+                sync_audio = self.audio_sync.get_synchronized_audio(timeout=0.5)
+                
+                if sync_audio is not None and len(sync_audio) > 0:
+                    # Применяем улучшение качества
+                    processed_audio = self.audio_processor.process(sync_audio)
+                    
+                    # Конвертируем в int16
+                    int_audio = (processed_audio * 32767).astype(np.int16)
+                    
+                    # Проверяем на тишину и речь
+                    volume = np.abs(int_audio).mean()
+                    
+                    if volume > self.silence_threshold:
+                        self.silent_chunks = 0
+                        
+                        if not self.speaking:
+                            self.speaking = True
+                            print("Речь обнаружена (синхронизированное аудио)")
+                        
+                        self.current_frames.append(int_audio.tobytes())
+                    else:
+                        self.silent_chunks += 1
+                        
+                        if self.speaking and self.silent_chunks > int(self.rate / self.chunk_size * self.silence_duration):
+                            self.speaking = False
+                            
+                            if self.current_frames:
+                                self.frames_queue.put(self.current_frames.copy())
+                                print(f"Фрагмент речи добавлен в очередь (синхронизированный)")
+                                self.current_frames = []
+                        
+                        elif self.speaking:
+                            self.current_frames.append(int_audio.tobytes())
+                            
+            except Exception as e:
+                print(f"Ошибка при обработке синхронизированного аудио: {e}")
+                
+            time.sleep(0.01)
+        
+        print("Поток обработки синхронизированного аудио завершен")
+    
+    def _process_synchronized_audio(self):
+        """
+        Обрабатывает синхронизированное аудио и добавляет в очередь
+        """
+        print("Запущен поток обработки синхронизированного аудио")
+        
+        while self.is_recording and self.use_synchronizer:
+            try:
+                # Получаем синхронизированное аудио
+                sync_audio = self.audio_sync.get_synchronized_audio(timeout=0.5)
+                
+                if sync_audio is not None and len(sync_audio) > 0:
+                    # Применяем улучшение качества
+                    processed_audio = self.audio_processor.process(sync_audio)
+                    
+                    # Конвертируем в int16
+                    int_audio = (processed_audio * 32767).astype(np.int16)
+                    
+                    # Проверяем на тишину и речь
+                    volume = np.abs(int_audio).mean()
+                    
+                    if volume > self.silence_threshold:
+                        self.silent_chunks = 0
+                        
+                        if not self.speaking:
+                            self.speaking = True
+                            print("Речь обнаружена (синхронизированное аудио)")
+                        
+                        self.current_frames.append(int_audio.tobytes())
+                    else:
+                        self.silent_chunks += 1
+                        
+                        if self.speaking and self.silent_chunks > int(self.rate / self.chunk_size * self.silence_duration):
+                            self.speaking = False
+                            
+                            if self.current_frames:
+                                self.frames_queue.put(self.current_frames.copy())
+                                print(f"Фрагмент речи добавлен в очередь (синхронизированный)")
+                                self.current_frames = []
+                        
+                        elif self.speaking:
+                            self.current_frames.append(int_audio.tobytes())
+                            
+            except Exception as e:
+                print(f"Ошибка при обработке синхронизированного аудио: {e}")
+                
+            time.sleep(0.01)
+        
+        print("Поток обработки синхронизированного аудио завершен")
+    
+    def start_universal_recording(self, input_device_index=None, output_device_index=None):
+        """
+        Начинает запись аудио с микрофона и системного звука с использованием
+        универсального метода, который автоматически выбирает оптимальный способ
+        захвата звука для текущей системы
+        
+        Args:
+            input_device_index: Индекс устройства ввода (микрофон)
+            output_device_index: Индекс устройства вывода (наушники/колонки)
+        """
+        if self.is_recording:
+            print("Запись уже идет")
+            return
+            
+        self.is_recording = True
+        self.current_frames = []
+        self.silent_chunks = 0
+        self.speaking = False
+        
+        # Для хранения потоков
+        self.streams = []
+        
+        try:
+            # 1. Создаем поток для записи с микрофона
+            mic_stream = sd.InputStream(
+                samplerate=self.rate,
+                channels=self.channels,
+                device=input_device_index,
+                blocksize=self.chunk_size,
+                dtype='float32',
+                callback=self.audio_callback
+            )
+            
+            self.streams.append(mic_stream)
+            mic_stream.start()
+            print(f"Запись с микрофона (индекс {input_device_index}) началась")
+            
+            # 2. Создаем объект для захвата системного звука
+            self.system_capture = SystemAudioCapture(
+                sample_rate=self.rate,
+                channels=self.channels,
+                chunk_size=self.chunk_size
+            )
+            
+            # Запускаем захват системного звука в отдельном потоке
+            threading.Thread(
+                target=self._capture_system_audio,
+                args=(output_device_index,),
+                daemon=True
+            ).start()
+            
+            print("Захват системного звука запущен")
+            print("Звук с микрофона и системы будет объединен")
+            
+        except Exception as e:
+            self.is_recording = False
+            
+            # Закрываем открытые потоки
+            for stream in self.streams:
+                try:
+                    stream.stop()
+                    stream.close()
+                except:
+                    pass
+            
+            self.streams = []
+            print(f"Ошибка при запуске записи: {e}")
+            raise
+    
+    def _capture_system_audio(self, device_index):
+        """
+        Функция для захвата системного звука в отдельном потоке
+        
+        Args:
+            device_index: Индекс устройства вывода
+        """
+        try:
+            # Запускаем захват системного звука
+            self.system_capture.start_recording(device_index)
+            
+            # Регулярно получаем данные и обрабатываем их
+            while self.is_recording:
+                # Подождем немного, чтобы накопились данные
+                time.sleep(0.5)
+                
+                # Получаем данные
+                audio_data = self.system_capture.get_audio_data()
+                
+                if audio_data is not None:
+                    # Обрабатываем данные так же, как и с микрофона
+                    self._process_system_audio(audio_data)
+            
+            # Останавливаем захват
+            self.system_capture.stop_recording()
+            
+        except Exception as e:
+            print(f"Ошибка при захвате системного звука: {e}")
+    
+    def _process_system_audio(self, audio_data):
+        """
+        Обрабатывает аудиоданные от системного звука
+        
+        Args:
+            audio_data: Аудиоданные в формате numpy array
+        """
+        # Конвертируем в формат int16
+        int_data = (audio_data * 32767).astype(np.int16)
+        
+        # Получаем байтовое представление
+        data = int_data.tobytes()
+        
+        # Проверка на тишину
+        volume = np.abs(int_data).mean()
+        
+        # Для системного звука повышаем порог, чтобы не реагировать на тихие звуки
+        higher_threshold = self.silence_threshold * 1.5
+        
+        if volume > higher_threshold:
+            self.silent_chunks = 0
+            
+            if not self.speaking:
+                self.speaking = True
+                print("Обнаружен значимый звук в системном аудио")
+            
+            self.current_frames.append(data)
+        else:
+            # Тишина обрабатывается в основном коллбэке микрофона
+            pass
+
+
     def close(self):
         """
         Закрывает ресурсы записи
         """
         self.stop_recording()
+        
+        # Останавливаем Windows loopback
+        if self.windows_capture:
+            try:
+                self.windows_capture.stop_loopback_recording()
+            except Exception as e:
+                print(f"Ошибка при остановке Windows loopback: {e}")
+        
+        # Если есть объект захвата системного звука, также останавливаем его
+        if hasattr(self, 'system_capture'):
+            try:
+                self.system_capture.stop_recording()
+            except Exception as e:
+                print(f"Ошибка при остановке захвата системного звука: {e}")
+                pass
 
 
 # Тестовый код (выполняется только при запуске файла напрямую)
@@ -396,11 +1125,25 @@ if __name__ == "__main__":
         output_device_id = None
     
     try:
-        print(f"Начинаем запись с микрофона {input_device_name} и вывода звука...")
-        audio_capture.start_recording_with_both(
-            input_device_index=input_device_id, 
-            output_device_index=output_device_id
-        )
+        # Спрашиваем, какой режим использовать
+        print("\nВыберите режим записи:")
+        print("1. Стандартная запись с микрофона и системного звука (через Stereo Mix, если доступно)")
+        print("2. Продвинутая запись с прямым захватом звука с устройства вывода (может потребоваться дополнительная настройка)")
+        
+        mode_choice = int(input("Введите номер режима: "))
+        
+        if mode_choice == 1:
+            print(f"Начинаем запись с микрофона {input_device_name} и вывода звука (стандартный режим)...")
+            audio_capture.start_recording_with_both(
+                input_device_index=input_device_id, 
+                output_device_index=output_device_id
+            )
+        else:
+            print(f"Начинаем запись с микрофона {input_device_name} и вывода звука (продвинутый режим)...")
+            audio_capture.start_dual_recording(
+                input_device_index=input_device_id, 
+                output_device_index=output_device_id
+            )
         
         # Запустим 10-секундную запись в качестве теста
         print("Запись будет длиться 10 секунд...")
