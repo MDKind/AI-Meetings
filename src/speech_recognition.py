@@ -135,38 +135,56 @@ class SpeechRecognizer:
                 except Exception as e:
                     print(f"Не удалось удалить временный файл {temp_path}: {e}")
     
+    # Если вероятность отсутствия речи выше этого порога — отбрасываем сегмент.
+    # Устраняет «галлюцинации» Whisper на тишине/шуме.
+    NO_SPEECH_THRESHOLD = 0.6
+
     def _transcribe_with_whisper(self, audio_path, language=None):
         """
-        Выполняет распознавание с помощью Whisper
-        
+        Выполняет распознавание с помощью Whisper.
+        Фильтрует сегменты с высокой вероятностью отсутствия речи (no_speech_prob).
+
         Args:
             audio_path: Путь к аудиофайлу
             language: Язык для распознавания
-            
+
         Returns:
-            str: Распознанный текст
+            str: Распознанный текст или "" если речь не обнаружена
         """
         try:
-            # Подготавливаем параметры
             options = {}
             if language:
                 options["language"] = language
-            
-            # Если ffmpeg доступен, используем стандартный метод
+
             if self.ffmpeg_available:
-                print(f"Использование стандартного метода Whisper с параметрами: {options}")
                 result = self.model.transcribe(audio_path, **options)
-                text = result["text"].strip()
-                print(f"Распознанный текст: {text}")
-                return text
             else:
-                # Альтернативный метод без ffmpeg
-                print("Использование альтернативного метода без ffmpeg")
                 return self._transcribe_without_ffmpeg(audio_path, language)
-                
+
+            # Фильтр галлюцинаций: проверяем no_speech_prob по всем сегментам
+            segments = result.get("segments", [])
+            if segments:
+                # Берём взвешенное среднее: длинные сегменты важнее
+                total_dur = sum(s.get("end", 0) - s.get("start", 0) for s in segments)
+                if total_dur > 0:
+                    weighted_no_speech = sum(
+                        s.get("no_speech_prob", 0) * (s.get("end", 0) - s.get("start", 0))
+                        for s in segments
+                    ) / total_dur
+                else:
+                    weighted_no_speech = segments[0].get("no_speech_prob", 0)
+
+                if weighted_no_speech > self.NO_SPEECH_THRESHOLD:
+                    print(f"Сегмент отброшен (no_speech_prob={weighted_no_speech:.2f})")
+                    return ""
+
+            text = result["text"].strip()
+            if text:
+                print(f"Распознано: {text[:80]}{'...' if len(text) > 80 else ''}")
+            return text
+
         except Exception as e:
             print(f"Ошибка при распознавании с Whisper: {e}")
-            # Пробуем альтернативный метод
             return self._transcribe_without_ffmpeg(audio_path, language)
     
     def _transcribe_without_ffmpeg(self, audio_path, language=None):

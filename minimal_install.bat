@@ -4,32 +4,36 @@ echo   AI Meetings - Minimal Install
 echo ====================================
 echo.
 
-echo Installing only essential dependencies...
+echo Installing essential dependencies...
 echo.
 
-echo 1. Installing comtypes (for Windows audio)...
-pip install comtypes
+echo 1. Core dependencies...
+pip install numpy openai python-dotenv sounddevice
 
 echo.
-echo 2. Installing audio libraries...
-pip install sounddevice numpy scipy
+echo 2. Audio libraries...
+pip install scipy pyaudio pydub
 
 echo.
-echo 3. Installing OpenAI...
-pip install openai
+echo 3. PyTorch (CPU, for Whisper and Silero VAD)...
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 
 echo.
-echo 4. Installing other essentials...
-pip install python-dotenv
+echo 4. Whisper speech recognition...
+pip install openai-whisper
+
+echo.
+echo 5. Windows audio (optional, for WASAPI loopback)...
+pip install comtypes pycaw
 
 echo.
 echo ====================================
-echo Basic dependencies installed!
+echo Installation complete!
 echo.
-echo To install ALL dependencies (including Whisper), run:
-echo   pip install -r requirements.txt
-echo.
-echo To run the application:
+echo To run:
 echo   python main.py
+echo.
+echo Note: Silero VAD will be downloaded automatically
+echo on first run (~1.8 MB, requires internet).
 echo ====================================
 pause

@@ -1,92 +1,100 @@
-# AI Meetings - Аудио-ассистент для встреч
+# AI Meetings — Аудио-ассистент для встреч
 
-Приложение для записи и обработки аудио встреч с интеграцией ChatGPT.
+Запись, транскрипция и саммари встреч с интеграцией LLM (OpenAI / LM Studio / Ollama).
 
 ## Возможности
 
-- 🎤 Запись звука с микрофона
-- 🔊 Запись системного звука (YouTube, музыка, звонки)
-- 🗣️ Распознавание речи (Whisper)
-- 🤖 Интеграция с ChatGPT
-- 📝 Автоматическое создание саммари встреч
-- 💾 Сохранение и загрузка истории
+- Запись микрофона и системного звука одновременно
+- Распознавание речи (Whisper) с определением говорящего (я / собеседник)
+- Голосовая активация (Silero VAD) — без ложных срабатываний на фон
+- Интеграция с OpenAI API и любым OpenAI-совместимым сервером
+- Саммари встречи по кнопке (не в реальном времени)
 
-## Быстрый старт
+## Установка
 
-### 1. Установка
+### Вариант А — Установщик (рекомендуется)
+
+```
+winget install JRSoftware.InnoSetup   # один раз
+cd installer
+.\build_installer.ps1                 # собрать AI_Meetings_Setup.exe
+```
+
+Запустите `dist\AI_Meetings_Setup.exe` — мастер установит Python-зависимости,
+FFmpeg и настроит `.env` с вашим API-ключом.
+
+### Вариант Б — Вручную
 
 ```bash
-# Минимальная установка (без распознавания речи)
-minimal_install.bat
-
-# Или полная установка
-pip install -r requirements.txt
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install openai-whisper numpy openai python-dotenv sounddevice scipy pydub pyaudio comtypes pycaw
 ```
 
-### 2. Настройка
+Скопируйте `.env.example` → `.env` и вставьте ключ:
 
-Создайте файл `.env` в корневой папке:
 ```
-OPENAI_API_KEY=ваш_ключ_api
-```
-
-### 3. Запись системного звука
-
-Для записи звука из YouTube/браузера/приложений:
-
-```bash
-# Проверьте доступные устройства
-python tools\diagnose_audio_devices.py
-
-# Настройте Virtual Cable (если нужно)
-scripts\setup_cable_audio.bat
+OPENAI_API_KEY=sk-...
 ```
 
-**Важно:** Выберите "Stereo Mix" или "CABLE Output" как устройство ввода в приложении.
-
-### 4. Запуск
+## Запуск
 
 ```bash
 python main.py
 ```
 
+## Настройка
+
+Все параметры — в файле `.env` (см. `.env.example`):
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `OPENAI_API_KEY` | — | Ключ OpenAI (обязателен для облака) |
+| `OPENAI_API_BASE` | пусто | URL для LM Studio / Ollama |
+| `CHATGPT_MODEL` | `gpt-4o` | Модель LLM |
+| `WHISPER_MODEL` | `base` | Размер модели Whisper (tiny/base/small/medium/large) |
+| `WHISPER_LANGUAGE` | `ru` | Язык распознавания |
+
+Примеры Base URL:
+- LM Studio: `http://127.0.0.1:1234/v1`
+- Ollama: `http://127.0.0.1:11434/v1`
+
+## Запись системного звука
+
+Для записи звука из браузера / видеозвонков нужен один из вариантов:
+
+1. **Stereo Mix** — включить в Панель управления → Звук → Запись → Показать отключённые устройства
+2. **VB-Audio Virtual Cable** — [vb-audio.com/Cable](https://vb-audio.com/Cable/)
+
+Подробнее: `docs/SYSTEM_AUDIO_SETUP.md`, `scripts/setup_cable_audio.bat`
+
 ## Структура проекта
 
 ```
 AI_Meetings/
-├── main.py              # Основной файл запуска
-├── minimal_install.bat  # Установщик
-├── src/                 # Исходный код
-├── docs/               # Документация
-├── tools/              # Утилиты для диагностики
-└── scripts/            # Вспомогательные скрипты
+├── main.py              # Точка входа
+├── src/                 # Исходный код (ui, audio_capture, vad, speech_recognition, chatgpt_client...)
+├── utils/               # Конфиг и утилиты
+├── installer/           # InnoSetup скрипт + build_installer.ps1
+├── scripts/             # BAT-скрипты для настройки аудио
+├── tools/               # Диагностика (diagnose_audio_devices.py, check_dependencies.py)
+└── docs/                # Документация по настройке
 ```
 
 ## Решение проблем
 
-### Не записывается звук из браузера?
-1. Включите Stereo Mix в настройках Windows
-2. Или установите [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)
-3. См. `docs/RECORD_YOUTUBE_AUDIO.md`
-
-### Ошибки при запуске?
 ```bash
-# Проверка зависимостей
-python tools\check_dependencies.py
-
-# Тест запуска
-python tools\test_startup.py
+python tools\diagnose_audio_devices.py   # список аудио устройств
+python tools\check_dependencies.py       # проверка зависимостей
+python tools\test_startup.py             # тест запуска
 ```
 
-## Документация
-
-- `docs/SYSTEM_AUDIO_SETUP.md` - Настройка записи системного звука
-- `docs/VIRTUAL_CABLE_AUDIO_SETUP.md` - Настройка Virtual Cable
-- `docs/TROUBLESHOOTING_SUMMARY.md` - Решение всех проблем
+- Нет звука из браузера → `docs/RECORD_YOUTUBE_AUDIO.md`
+- Ошибки comtypes/pycaw → `docs/COMTYPES_ERROR_FIX.md`
+- Общие проблемы → `docs/TROUBLESHOOTING_SUMMARY.md`
 
 ## Требования
 
-- Windows 10/11
+- Windows 10/11 (64-bit)
 - Python 3.8+
-- Микрофон (для записи голоса)
-- Stereo Mix или Virtual Cable (для записи системного звука)
+- Микрофон
+- ~1 ГБ свободного места (PyTorch + модели Whisper)

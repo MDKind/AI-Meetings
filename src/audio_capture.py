@@ -6,9 +6,11 @@ import numpy as np
 from queue import Queue
 import os
 import platform
+from datetime import datetime
 from utils.config import AUDIO_SETTINGS
 from src.system_audio_capture import SystemAudioCapture
 from src.audio_synchronizer import AudioSynchronizer, EnhancedAudioProcessor
+from src.vad import create_vad
 
 # Windows-specific imports
 if platform.system() == 'Windows':
@@ -46,7 +48,10 @@ class AudioCapture:
         self.frames_queue = Queue()
         self.is_recording = False
         self.silence_threshold = silence_threshold
-        self.silence_duration = AUDIO_SETTINGS['silence_duration']
+        # 0.7 сек тишины достаточно для сегментации диалога (было 2.0 — слишком много)
+        self.silence_duration = AUDIO_SETTINGS.get('silence_duration_vad', 0.7)
+        # Максимальная длина сегмента: 15 сек (Whisper плохо работает с >30 сек)
+        self.max_segment_duration = AUDIO_SETTINGS.get('max_segment_duration', 15.0)
         self.stream = None
         self.streams = []
         self.current_frames = []
@@ -54,6 +59,13 @@ class AudioCapture:
         self.output_frames = []
         self.silent_chunks = 0
         self.speaking = False
+        # Время начала текущего сегмента речи
+        self._segment_start_time: datetime | None = None
+
+        # VAD: Silero если доступен, иначе RMS
+        self._vad = create_vad(threshold=0.5, rms_threshold=silence_threshold, sample_rate=rate)
+        self._vad_remote = create_vad(threshold=0.5, rms_threshold=silence_threshold, sample_rate=rate)
+        print(f"VAD инициализирован: {type(self._vad).__name__}")
         
         # Windows-specific audio capture
         self.windows_capture = None
@@ -169,49 +181,38 @@ class AudioCapture:
         
         return output_devices
     
-    def audio_callback(self, indata, frames, time, status):
+    def audio_callback(self, indata, frames, time_info, status):
         """
-        Callback функция для обработки входящих аудиоданных
-        
-        Args:
-            indata: Входящие аудиоданные
-            frames: Количество фреймов
-            time: Информация о времени
-            status: Статус аудиопотока
+        Callback функция для обработки входящих аудиоданных (микрофон, одиночный поток).
+        Использует VAD для детекции речи.
         """
         if status:
             print(f"Статус: {status}")
-            
-        # Конвертируем в формат int16 для совместимости
-        audio_data = (indata * 32767).astype(np.int16)
-        
-        # Получаем байтовое представление для совместимости с wave
+
+        # float32 → int16
+        audio_f32 = indata[:, 0] if indata.ndim > 1 else indata.flatten()
+        audio_data = (audio_f32 * 32767).astype(np.int16)
         data = audio_data.tobytes()
-        
-        # Проверка на тишину
-        volume = np.abs(audio_data).mean()
-        
-        if volume > self.silence_threshold:
+
+        is_speech = self._vad.is_speech(audio_f32)
+
+        if is_speech:
             self.silent_chunks = 0
-            
             if not self.speaking:
                 self.speaking = True
-                print("Речь обнаружена")
-            
+                self._segment_start_time = datetime.now()
             self.current_frames.append(data)
+
+            # Принудительная нарезка по максимальной длине
+            max_chunks = int(self.rate / self.chunk_size * self.max_segment_duration)
+            if len(self.current_frames) >= max_chunks:
+                self._flush_segment(speaker="local")
         else:
             self.silent_chunks += 1
-            
-            # Если речь закончилась и есть что обрабатывать
-            if self.speaking and self.silent_chunks > int(self.rate / self.chunk_size * self.silence_duration):
-                self.speaking = False
-                
-                if self.current_frames:
-                    self.frames_queue.put(self.current_frames.copy())
-                    print(f"Фрагмент речи добавлен в очередь (длина: {len(self.current_frames)} чанков)")
-                    self.current_frames = []
-            
-            # Если все еще говорят, продолжаем записывать тишину (для контекста)
+            silence_chunks_threshold = int(self.rate / self.chunk_size * self.silence_duration)
+
+            if self.speaking and self.silent_chunks > silence_chunks_threshold:
+                self._flush_segment(speaker="local")
             elif self.speaking:
                 self.current_frames.append(data)
     
@@ -231,7 +232,9 @@ class AudioCapture:
         self.current_frames = []
         self.silent_chunks = 0
         self.speaking = False
-        
+        self._segment_start_time = None
+        self._vad.reset()
+
         # Запускаем поток записи
         try:
             if device_type == "output":
@@ -497,104 +500,124 @@ class AudioCapture:
             print(f"Ошибка при запуске записи: {e}")
             raise
     
-    def mic_callback(self, indata, frames, time, status):
-        """
-        Callback для микрофона
-        
-        Args:
-            indata: Входящие аудиоданные
-            frames: Количество фреймов
-            time: Информация о времени
-            status: Статус аудиопотока
-        """
+    def mic_callback(self, indata, frames, time_info, status):
+        """Callback для микрофона (speaker="local")."""
         if status:
             print(f"Статус микрофона: {status}")
-            
-        # Конвертируем в формат int16
+
         audio_data = (indata * 32767).astype(np.int16)
-        
-        # Сохраняем данные микрофона
         self.mic_frames.append(audio_data.copy())
-        
-        # Обрабатываем данные микрофона
-        self._process_audio_data(audio_data)
-    
-    def output_callback(self, indata, frames, time, status):
+        self._process_audio_data(audio_data, speaker="local")
+
+    def output_callback(self, indata, frames, time_info, status):
         """
-        Callback для устройства вывода (системный звук)
-        
-        Args:
-            indata: Входящие аудиоданные
-            frames: Количество фреймов
-            time: Информация о времени
-            status: Статус аудиопотока
+        Callback для системного звука (speaker="remote").
+        Обрабатывается независимым VAD — не смешивается с микрофонным потоком.
         """
         if status:
             print(f"Статус системного звука: {status}")
-            
-        # Конвертируем в формат int16
+
         audio_data = (indata * 32767).astype(np.int16)
-        
-        # Сохраняем данные системного звука
         self.output_frames.append(audio_data.copy())
-        
-        # Также проверяем данные системного звука на наличие речи
-        # (но с повышенным порогом, чтобы не реагировать на фоновые звуки)
-        # Получаем байтовое представление
-        data = audio_data.tobytes()
-        
-        # Для системного звука повышаем порог, чтобы не реагировать на тихие звуки
-        higher_threshold = self.silence_threshold * 1.5
-        
-        # Проверяем уровень звука
-        volume = np.abs(audio_data).mean()
-        
-        if volume > higher_threshold and not self.speaking:
-            # Если обнаружена активность в системном звуке и еще нет записи,
-            # начинаем запись как если бы это была речь
-            self.silent_chunks = 0
-            self.speaking = True
-            print("Обнаружен значимый звук в системном аудио")
-            # Добавляем текущий фрейм
-            self.current_frames.append(data)
+
+        audio_f32 = audio_data.astype(np.float32) / 32767.0
+        is_speech = self._vad_remote.is_speech(audio_f32)
+
+        if is_speech:
+            # Системный звук: добавляем в отдельную mini-очередь с пометкой remote
+            # (не смешиваем с self.current_frames — это микрофонный буфер)
+            data = audio_data.tobytes()
+            if not hasattr(self, '_remote_frames'):
+                self._remote_frames = []
+                self._remote_start_time = datetime.now()
+            self._remote_frames.append(data)
+
+            max_chunks = int(self.rate / self.chunk_size * self.max_segment_duration)
+            if len(self._remote_frames) >= max_chunks:
+                self._flush_remote_segment()
+        else:
+            if hasattr(self, '_remote_frames') and self._remote_frames:
+                if not hasattr(self, '_remote_silent_chunks'):
+                    self._remote_silent_chunks = 0
+                self._remote_silent_chunks += 1
+                threshold = int(self.rate / self.chunk_size * self.silence_duration)
+                if self._remote_silent_chunks > threshold:
+                    self._flush_remote_segment()
+            elif hasattr(self, '_remote_frames'):
+                self._remote_frames.append(audio_data.tobytes())
+
+    def _flush_remote_segment(self):
+        """Отправляет накопленный сегмент системного звука в очередь."""
+        if not hasattr(self, '_remote_frames') or not self._remote_frames:
+            return
+        self.frames_queue.put({
+            "frames": self._remote_frames.copy(),
+            "speaker": "remote",
+            "start_time": getattr(self, '_remote_start_time', datetime.now()),
+            "end_time": datetime.now(),
+        })
+        print(f"Сегмент remote в очереди: чанков={len(self._remote_frames)}")
+        self._remote_frames = []
+        self._remote_start_time = None
+        self._remote_silent_chunks = 0
     
-    def _process_audio_data(self, audio_data):
+    def _process_audio_data(self, audio_data, speaker: str = "local"):
         """
-        Обрабатывает аудио данные - обнаружение речи и добавление в очередь
-        
+        Обрабатывает аудиоданные — детекция речи через VAD и добавление в очередь.
+
         Args:
-            audio_data: Аудиоданные для обработки
+            audio_data: int16 numpy array
+            speaker: "local" (микрофон) или "remote" (системный звук)
         """
-        # Получаем байтовое представление
         data = audio_data.tobytes()
-        
-        # Проверка на тишину
-        volume = np.abs(audio_data).mean()
-        
-        if volume > self.silence_threshold:
+
+        # Конвертируем в float32 для VAD
+        audio_f32 = audio_data.astype(np.float32) / 32767.0
+        is_speech = self._vad.is_speech(audio_f32)
+
+        if is_speech:
             self.silent_chunks = 0
-            
             if not self.speaking:
                 self.speaking = True
-                print("Речь обнаружена")
-            
+                self._segment_start_time = datetime.now()
             self.current_frames.append(data)
+
+            max_chunks = int(self.rate / self.chunk_size * self.max_segment_duration)
+            if len(self.current_frames) >= max_chunks:
+                self._flush_segment(speaker=speaker)
         else:
             self.silent_chunks += 1
-            
-            # Если речь закончилась и есть что обрабатывать
-            if self.speaking and self.silent_chunks > int(self.rate / self.chunk_size * self.silence_duration):
-                self.speaking = False
-                
-                if self.current_frames:
-                    # Добавляем сегмент в очередь
-                    self.frames_queue.put(self.current_frames.copy())
-                    print(f"Фрагмент речи добавлен в очередь (длина: {len(self.current_frames)} чанков)")
-                    self.current_frames = []
-            
-            # Если все еще говорят, продолжаем записывать тишину (для контекста)
+            silence_chunks_threshold = int(self.rate / self.chunk_size * self.silence_duration)
+
+            if self.speaking and self.silent_chunks > silence_chunks_threshold:
+                self._flush_segment(speaker=speaker)
             elif self.speaking:
                 self.current_frames.append(data)
+
+    def _flush_segment(self, speaker: str = "local"):
+        """
+        Отправляет накопленный сегмент в очередь с метаданными.
+
+        Формат элемента очереди:
+            {
+                "frames": list[bytes],
+                "speaker": "local" | "remote",
+                "start_time": datetime,
+                "end_time": datetime,
+            }
+        """
+        if not self.current_frames:
+            return
+        self.frames_queue.put({
+            "frames": self.current_frames.copy(),
+            "speaker": speaker,
+            "start_time": self._segment_start_time or datetime.now(),
+            "end_time": datetime.now(),
+        })
+        print(f"Сегмент в очереди: speaker={speaker}, чанков={len(self.current_frames)}")
+        self.current_frames = []
+        self.speaking = False
+        self._segment_start_time = None
 
     def stop_recording(self):
         """
@@ -657,27 +680,40 @@ class AudioCapture:
     
     def get_next_audio_segment(self):
         """
-        Получает следующий сегмент аудио из очереди, если доступен
-        
+        Получает следующий сегмент аудио из очереди, если доступен.
+
         Returns:
-            list: Список фреймов аудио или None, если очередь пуста
+            dict с полями:
+                "frames"    : list[bytes] — аудиоданные
+                "speaker"   : "local" | "remote" — источник
+                "start_time": datetime — начало сегмента
+                "end_time"  : datetime — конец сегмента
+            или None если очередь пуста.
         """
         # Если синхронизатор активен, получаем данные оттуда
         if self.use_synchronizer and self.audio_sync:
-            # Получаем синхронизированное аудио
             sync_audio = self.audio_sync.get_synchronized_audio(timeout=0.1)
-            
             if sync_audio is not None:
-                # Применяем улучшение качества
                 processed_audio = self.audio_processor.process(sync_audio)
-                
-                # Конвертируем в int16 и возвращаем как список байтов
                 int_audio = (processed_audio * 32767).astype(np.int16)
-                return [int_audio.tobytes()]
-        
-        # Стандартный метод
+                return {
+                    "frames": [int_audio.tobytes()],
+                    "speaker": "local",
+                    "start_time": datetime.now(),
+                    "end_time": datetime.now(),
+                }
+
         if not self.frames_queue.empty():
-            return self.frames_queue.get()
+            segment = self.frames_queue.get()
+            # Backward-compat: если в очереди старый формат (list), оборачиваем
+            if isinstance(segment, list):
+                return {
+                    "frames": segment,
+                    "speaker": "local",
+                    "start_time": datetime.now(),
+                    "end_time": datetime.now(),
+                }
+            return segment
         return None
     
     def start_enhanced_recording(self, input_device_index=None, output_device_index=None):
@@ -878,57 +914,7 @@ class AudioCapture:
             time.sleep(0.01)
         
         print("Поток обработки синхронизированного аудио завершен")
-    
-    def _process_synchronized_audio(self):
-        """
-        Обрабатывает синхронизированное аудио и добавляет в очередь
-        """
-        print("Запущен поток обработки синхронизированного аудио")
-        
-        while self.is_recording and self.use_synchronizer:
-            try:
-                # Получаем синхронизированное аудио
-                sync_audio = self.audio_sync.get_synchronized_audio(timeout=0.5)
-                
-                if sync_audio is not None and len(sync_audio) > 0:
-                    # Применяем улучшение качества
-                    processed_audio = self.audio_processor.process(sync_audio)
-                    
-                    # Конвертируем в int16
-                    int_audio = (processed_audio * 32767).astype(np.int16)
-                    
-                    # Проверяем на тишину и речь
-                    volume = np.abs(int_audio).mean()
-                    
-                    if volume > self.silence_threshold:
-                        self.silent_chunks = 0
-                        
-                        if not self.speaking:
-                            self.speaking = True
-                            print("Речь обнаружена (синхронизированное аудио)")
-                        
-                        self.current_frames.append(int_audio.tobytes())
-                    else:
-                        self.silent_chunks += 1
-                        
-                        if self.speaking and self.silent_chunks > int(self.rate / self.chunk_size * self.silence_duration):
-                            self.speaking = False
-                            
-                            if self.current_frames:
-                                self.frames_queue.put(self.current_frames.copy())
-                                print(f"Фрагмент речи добавлен в очередь (синхронизированный)")
-                                self.current_frames = []
-                        
-                        elif self.speaking:
-                            self.current_frames.append(int_audio.tobytes())
-                            
-            except Exception as e:
-                print(f"Ошибка при обработке синхронизированного аудио: {e}")
-                
-            time.sleep(0.01)
-        
-        print("Поток обработки синхронизированного аудио завершен")
-    
+
     def start_universal_recording(self, input_device_index=None, output_device_index=None):
         """
         Начинает запись аудио с микрофона и системного звука с использованием

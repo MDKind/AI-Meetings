@@ -26,7 +26,8 @@ wheels/
 *.egg
 
 # Временные файлы данных
-data/temp/
+data/temp/*
+!data/temp/.gitkeep
 *.wav
 *.mp3
 *.ogg
@@ -56,11 +57,14 @@ api_keys.json
 config_local.py
 
 # Артефакты сборки
-*.exe
 *.dll
-*.so
 *.dylib
 *.out
+# installer: игнорируем скачанные бинарники и готовый .exe, но не скрипты
+installer/bundled/ffmpeg/*.exe
+dist/*.exe
+# install_deps.log генерируется на машине пользователя
+install_deps.log
 
 # Кэш и временные файлы
 __pycache__/
@@ -72,10 +76,14 @@ __pycache__/
 htmlcov/
 .tox/
 
-# Временные файлы разработки
-_backup/
-backup/
-
 # Тестовые записи
 test_recording_*.wav
 debug_recording_*.wav
+
+# Сохранённые разговоры и саммари (генерируются пользователем)
+conversation_*.json
+summary_*.json
+summary_*.txt
+
+# Кэш моделей PyTorch/Silero (скачиваются автоматически)
+# torch/hub кэш хранится в ~/.cache/torch/hub/ — не в репозитории

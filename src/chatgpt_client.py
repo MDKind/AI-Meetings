@@ -7,19 +7,26 @@ from utils.config import CHATGPT_SETTINGS
 
 class ChatGPTClient:
     """
-    Класс для взаимодействия с API ChatGPT
+    Класс для взаимодействия с OpenAI API и совместимыми сервисами (LM Studio, Ollama и др.)
     """
-    def __init__(self, api_key=None, model=CHATGPT_SETTINGS['default_model'], 
-                 max_tokens=CHATGPT_SETTINGS['max_tokens']):
+    # Максимальное количество сообщений в истории (скользящее окно)
+    MAX_HISTORY_MESSAGES = 50
+
+    def __init__(self, api_key=None, model=CHATGPT_SETTINGS['default_model'],
+                 max_tokens=CHATGPT_SETTINGS['max_tokens'],
+                 base_url=None):
         """
-        Инициализирует клиент ChatGPT
-        
+        Инициализирует клиент ChatGPT / OpenAI-compatible API
+
         Args:
-            api_key (str, optional): API ключ OpenAI. Если None, берется из конфигурации или переменных окружения.
+            api_key (str, optional): API ключ. Если None, берется из конфигурации или переменных окружения.
+                                     Для локальных серверов (LM Studio) можно передать любую строку.
             model (str): Модель для использования
             max_tokens (int): Максимальное количество токенов в ответе
+            base_url (str, optional): Кастомный URL API (например http://127.0.0.1:1234/v1 для LM Studio).
+                                      Если None, берется из конфигурации.
         """
-        # Получаем API ключ из конфигурации или переменной окружения, если не передан
+        # Получаем API ключ
         if api_key is None:
             api_key = CHATGPT_SETTINGS.get('api_key') or os.getenv("OPENAI_API_KEY")
             if api_key is None:
@@ -27,24 +34,46 @@ class ChatGPTClient:
                     "Необходимо указать API ключ OpenAI через параметр api_key, "
                     "переменную окружения OPENAI_API_KEY или в файле конфигурации."
                 )
-        
-        self.client = OpenAI(api_key=api_key)
+
+        # Определяем base_url: параметр > конфиг > None (стандартный OpenAI)
+        if base_url is None:
+            base_url = CHATGPT_SETTINGS.get('api_base_url') or None
+        # Пустую строку трактуем как «не задан»
+        if base_url == '':
+            base_url = None
+
+        client_kwargs = {'api_key': api_key}
+        if base_url:
+            client_kwargs['base_url'] = base_url
+
+        self.client = OpenAI(**client_kwargs)
+        self.base_url = base_url
         self.model = model
         self.max_tokens = max_tokens
         self.conversation_history = []
-        
+
         # Системный промпт из конфигурации
         self.system_prompt = CHATGPT_SETTINGS['system_prompt']
     
     def add_message(self, content, role="user"):
         """
-        Добавляет сообщение в историю разговора
-        
+        Добавляет сообщение в историю разговора.
+        При превышении MAX_HISTORY_MESSAGES удаляет самые старые сообщения парами
+        (user + assistant), чтобы не обрезать историю посередине диалога.
+
         Args:
             content (str): Содержимое сообщения
             role (str): Роль отправителя ("user", "assistant", "system")
         """
-        self.conversation_history.append({"role": role, "content": content})
+        self.conversation_history.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        })
+
+        # Скользящее окно: обрезаем попарно с начала
+        while len(self.conversation_history) > self.MAX_HISTORY_MESSAGES:
+            self.conversation_history.pop(0)
     
     def get_response(self, prompt=None):
         """
@@ -60,10 +89,13 @@ class ChatGPTClient:
             self.add_message(prompt)
         
         try:
-            # Подготавливаем сообщения для API
+            # Подготавливаем сообщения для API (только role + content, без timestamp)
             messages = [{"role": "system", "content": self.system_prompt}]
-            messages.extend(self.conversation_history)
-            
+            messages.extend(
+                {"role": m["role"], "content": m["content"]}
+                for m in self.conversation_history
+            )
+
             # Выполняем запрос к API
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -102,7 +134,10 @@ class ChatGPTClient:
         """
         
         messages = [{"role": "system", "content": self.system_prompt}]
-        messages.extend(self.conversation_history)
+        messages.extend(
+            {"role": m["role"], "content": m["content"]}
+            for m in self.conversation_history
+        )
         messages.append({"role": "user", "content": summary_prompt})
         
         try:

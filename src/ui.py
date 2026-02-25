@@ -41,9 +41,12 @@ class AudioAssistantUI:
         self.output_device_index = None
         self.assistant_active = False
         
+        # Буфер накопленных транскрипций (не отправляем в LLM автоматически)
+        self.transcription_buffer = []
+
         # Создаем пользовательский интерфейс
         self.create_ui()
-        
+
         # Инициализируем список устройств
         self.refresh_devices()
         
@@ -129,11 +132,29 @@ class AudioAssistantUI:
         self.language_combobox.current(0)  # ru по умолчанию
         self.language_combobox.grid(row=0, column=3, padx=5, pady=5, sticky="w")
         
-        ttk.Label(settings_frame, text="Модель ChatGPT:", font=default_font).grid(row=0, column=4, padx=(15, 5), pady=5, sticky="w")
-        self.chatgpt_model_combobox = ttk.Combobox(settings_frame, values=["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"], 
-                                                  width=12, font=default_font)
+        ttk.Label(settings_frame, text="Модель LLM:", font=default_font).grid(row=0, column=4, padx=(15, 5), pady=5, sticky="w")
+        self.chatgpt_model_combobox = ttk.Combobox(
+            settings_frame,
+            values=["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "llama-3.2-3b-instruct", "mistral-7b-instruct"],
+            width=22, font=default_font
+        )
         self.chatgpt_model_combobox.current(0)  # gpt-4o по умолчанию
         self.chatgpt_model_combobox.grid(row=0, column=5, padx=5, pady=5, sticky="w")
+
+        # Строка настроек API
+        api_frame = ttk.Frame(control_frame)
+        api_frame.pack(fill="x", pady=2)
+
+        ttk.Label(api_frame, text="API Base URL:", font=default_font).pack(side="left", padx=5)
+        self.api_base_url_var = tk.StringVar(value=self._get_default_api_base_url())
+        self.api_base_url_entry = ttk.Entry(api_frame, textvariable=self.api_base_url_var,
+                                            width=40, font=default_font)
+        self.api_base_url_entry.pack(side="left", padx=5)
+        ttk.Label(api_frame, text="(пусто = OpenAI)", font=("Arial", 8)).pack(side="left")
+        ttk.Button(api_frame, text="Применить", command=self.apply_api_settings,
+                   width=10).pack(side="left", padx=5)
+        self.api_status_label = ttk.Label(api_frame, text="", font=("Arial", 8), foreground="green")
+        self.api_status_label.pack(side="left", padx=5)
         
         # Кнопки управления
         buttons_frame = ttk.Frame(control_frame)
@@ -205,6 +226,42 @@ class AudioAssistantUI:
                                    relief=tk.SUNKEN, anchor=tk.W, font=("Arial", 9))
         self.status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
+    def _get_default_api_base_url(self):
+        """Возвращает значение API base URL из конфига или пустую строку."""
+        from utils.config import CHATGPT_SETTINGS
+        return CHATGPT_SETTINGS.get('api_base_url', '') or ''
+
+    def apply_api_settings(self):
+        """
+        Применяет новые настройки API (base URL и модель) к ChatGPT клиенту без перезапуска.
+        """
+        if not self.chatgpt_client:
+            return
+
+        from openai import OpenAI
+        import os
+
+        base_url = self.api_base_url_var.get().strip() or None
+        model = self.chatgpt_model_combobox.get().strip()
+
+        try:
+            api_key = self.chatgpt_client.client.api_key
+            client_kwargs = {'api_key': api_key}
+            if base_url:
+                client_kwargs['base_url'] = base_url
+
+            self.chatgpt_client.client = OpenAI(**client_kwargs)
+            self.chatgpt_client.base_url = base_url
+            if model:
+                self.chatgpt_client.model = model
+
+            if base_url:
+                self.api_status_label.config(text=f"✓ {base_url}", foreground="green")
+            else:
+                self.api_status_label.config(text="✓ OpenAI API", foreground="green")
+        except Exception as e:
+            self.api_status_label.config(text=f"Ошибка: {e}", foreground="red")
+
     def show_recording_info(self):
         """
         Показывает информацию о режимах записи
@@ -463,20 +520,41 @@ class AudioAssistantUI:
             # Планируем следующее обновление даже при ошибке
             self.root.after(100, self.update_audio_level)
             
-    def update_transcription(self, text):
+    def update_transcription(self, text, speaker="local", start_time=None):
         """
-        Обновляет текст в поле распознавания
-        
+        Обновляет текст в поле распознавания с цветовой индикацией говорящего.
+
         Args:
             text (str): Распознанный текст
+            speaker (str): "local" (я) или "remote" (собеседник)
+            start_time (datetime, optional): Время начала сегмента
         """
-        # Добавляем временную метку
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        formatted_text = f"[{timestamp}] {text}\n\n"
-        
-        # Вставляем текст в конец
+        ts = start_time.strftime("%H:%M:%S") if start_time else datetime.datetime.now().strftime("%H:%M:%S")
+        speaker_label = "Я" if speaker == "local" else "Собеседник"
+        tag = f"speaker_{speaker}"
+
         self.transcription_text.configure(state="normal")
-        self.transcription_text.insert(tk.END, formatted_text)
+
+        # Настраиваем теги цветов один раз при первом использовании
+        if not hasattr(self, '_tags_configured'):
+            self.transcription_text.tag_configure(
+                "speaker_local",
+                foreground="#1a56db",   # синий — ваш голос
+                font=("Arial", UI_SETTINGS['font_size'], "bold")
+            )
+            self.transcription_text.tag_configure(
+                "speaker_remote",
+                foreground="#057a55",   # зелёный — собеседник
+                font=("Arial", UI_SETTINGS['font_size'], "bold")
+            )
+            self._tags_configured = True
+
+        # Заголовок реплики (с цветом)
+        header = f"[{ts}] {speaker_label}: "
+        self.transcription_text.insert(tk.END, header, tag)
+        # Текст реплики (обычный)
+        self.transcription_text.insert(tk.END, f"{text}\n\n")
+
         self.transcription_text.see(tk.END)
         self.transcription_text.configure(state="disabled")
     
@@ -499,29 +577,33 @@ class AudioAssistantUI:
     
     def generate_summary(self):
         """
-        Генерирует и отображает саммари встречи
+        Генерирует и отображает саммари встречи по накопленным транскрипциям.
+        Вызывается явно по кнопке — не в реальном времени.
         """
         if not self.chatgpt_client:
             messagebox.showerror("Ошибка", "ChatGPT клиент не инициализирован")
             return
-            
-        # Проверяем, есть ли история разговора
-        if not self.chatgpt_client.conversation_history:
-            messagebox.showinfo("Информация", "История разговора пуста. Нечего резюмировать.")
+
+        if not self.chatgpt_client.conversation_history and not self.transcription_buffer:
+            messagebox.showinfo("Информация", "Нет записанных фрагментов. Начните запись.")
             return
-            
+
         self.status_var.set("Генерация саммари встречи...")
         self.root.update()
-        
-        # Генерируем саммари
-        summary = self.chatgpt_client.generate_meeting_summary()
-        
-        # Отображаем саммари
+
+        # Генерируем саммари в фоновом потоке, чтобы не блокировать UI
+        def _do_summary():
+            summary = self.chatgpt_client.generate_meeting_summary()
+            self.root.after(0, self._show_summary, summary)
+
+        threading.Thread(target=_do_summary, daemon=True).start()
+
+    def _show_summary(self, summary):
+        """Отображает готовое саммари в UI (вызывается из main thread)."""
         self.summary_text.configure(state="normal")
         self.summary_text.delete(1.0, tk.END)
         self.summary_text.insert(tk.END, summary)
         self.summary_text.configure(state="disabled")
-        
         self.status_var.set("Саммари встречи сгенерировано")
     
     def save_conversation(self):
@@ -620,8 +702,9 @@ class AudioAssistantUI:
         if not messagebox.askyesno("Подтверждение", "Вы уверены, что хотите очистить всю историю разговора?"):
             return
             
-        # Очищаем историю в ChatGPT клиенте
+        # Очищаем историю в ChatGPT клиенте и локальный буфер
         self.chatgpt_client.clear_conversation()
+        self.transcription_buffer = []
         
         # Очищаем текстовые поля
         self.transcription_text.configure(state="normal")
@@ -663,40 +746,47 @@ class AudioAssistantUI:
     
     def process_audio(self):
         """
-        Обрабатывает аудио в отдельном потоке
+        Обрабатывает аудио в отдельном потоке.
+        Распознаёт речь и накапливает транскрипции в буфер.
+        ChatGPT вызывается только явно — по кнопке «Сгенерировать саммари».
         """
         while self.is_processing:
-            # Получаем следующий сегмент аудио
-            frames = self.audio_capture.get_next_audio_segment()
-            
-            if frames:
-                # Преобразуем фреймы в текст
+            segment = self.audio_capture.get_next_audio_segment()
+
+            if segment:
+                # segment — dict: {"frames", "speaker", "start_time", "end_time"}
+                frames = segment.get("frames", segment) if isinstance(segment, dict) else segment
+                speaker = segment.get("speaker", "local") if isinstance(segment, dict) else "local"
+                start_time = segment.get("start_time") if isinstance(segment, dict) else None
+
                 self.status_var.set("Распознавание речи...")
                 language = self.language_combobox.get()
                 if language == "auto":
                     language = None
-                    
+
                 transcription = self.speech_recognizer.transcribe_audio_data(frames, language=language)
-                
+
                 if transcription:
-                    # Выводим текст в UI
-                    self.update_transcription(transcription)
-                    
-                    # Отправляем текст в ChatGPT
-                    self.status_var.set("Получение ответа от ChatGPT...")
-                    response = self.chatgpt_client.get_response(transcription)
-                    
-                    # Выводим ответ в UI
-                    self.update_chat(response)
-                    
-                    # Обновляем статус
-                    self.status_var.set("Готов к обработке следующего фрагмента")
-                
-                # Сохраняем аудио для отладки (опционально)
-                # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                # self.audio_capture.save_audio(frames, f"audio_{timestamp}.wav")
-            
-            # Небольшая пауза, чтобы не нагружать процессор
+                    # Формируем метку говорящего
+                    speaker_label = "Я" if speaker == "local" else "Собеседник"
+
+                    # Добавляем в ChatGPT историю с пометкой говорящего
+                    msg_content = f"[{speaker_label}]: {transcription}"
+                    self.chatgpt_client.add_message(msg_content, role="user")
+
+                    # Накапливаем в локальный буфер
+                    self.transcription_buffer.append({
+                        "text": transcription,
+                        "speaker": speaker,
+                        "speaker_label": speaker_label,
+                        "start_time": start_time,
+                    })
+
+                    # Выводим в UI с пометкой говорящего
+                    self.root.after(0, self.update_transcription, transcription, speaker, start_time)
+
+                    self.status_var.set(f"Записано фрагментов: {len(self.transcription_buffer)}")
+
             time.sleep(0.1)
     
     def on_closing(self):

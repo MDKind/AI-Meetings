@@ -16,19 +16,20 @@ AUDIO_SETTINGS = {
 
 # Настройки для распознавания речи
 SPEECH_RECOGNITION = {
-    'default_model': 'base',    # Размер модели Whisper (tiny, base, small, medium, large)
-    'default_language': 'ru',   # Язык по умолчанию (ru, en, auto)
+    'default_model': os.getenv('WHISPER_MODEL', 'base'),      # Размер модели Whisper (tiny, base, small, medium, large)
+    'default_language': os.getenv('WHISPER_LANGUAGE', 'ru'),  # Язык по умолчанию (ru, en, auto)
     'temp_dir': os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'temp')
 }
 
-# Настройки для ChatGPT
+# Настройки для ChatGPT / OpenAI-compatible API
 CHATGPT_SETTINGS = {
-    'api_key': os.getenv('OPENAI_API_KEY'),   # API ключ берется из .env
-    'default_model': 'gpt-4o',                # Модель по умолчанию
-    'max_tokens': 2000,                       # Максимальное количество токенов в ответе
+    'api_key': os.getenv('OPENAI_API_KEY'),                    # API ключ берется из .env
+    'api_base_url': os.getenv('OPENAI_API_BASE', ''),          # Кастомный base URL (например LM Studio: http://127.0.0.1:1234/v1)
+    'default_model': os.getenv('CHATGPT_MODEL', 'gpt-4o'),    # Модель по умолчанию
+    'max_tokens': 2000,                                        # Максимальное количество токенов в ответе
     # Системный промпт для ChatGPT
     'system_prompt': """
-    Вы ассистент для ответов на вопросы во время встречи. 
+    Вы ассистент для ответов на вопросы во время встречи.
     Отвечайте кратко и по существу на заданные вопросы.
     Если вопрос не задан, просто анализируйте текст и собирайте информацию для саммари встречи.
     """

@@ -18,6 +18,11 @@ torch>=2.0.0
 torchaudio>=2.0.0  # Дополнительно для аудио обработки
 openai-whisper>=20231117
 
+# VAD (Voice Activity Detection)
+# Silero VAD загружается автоматически через torch.hub при первом запуске (~1.8 MB).
+# Предзагрузка вручную: python -c "import torch; torch.hub.load('snakers4/silero-vad', 'silero_vad')"
+# При недоступности автоматически используется RMS-пороговый детектор.
+
 # Для пользовательского интерфейса
 # tkinter обычно уже установлен с Python
 
