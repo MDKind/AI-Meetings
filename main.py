@@ -52,14 +52,20 @@ def main():
     root.update()
     
     try:
-        # Проверяем наличие API ключа OpenAI
+        # Проверяем конфигурацию API.
+        # Для локальных серверов (LM Studio / Ollama) ключ не нужен —
+        # достаточно указать OPENAI_API_BASE в .env.
         api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
+        api_base = os.getenv("OPENAI_API_BASE", "")
+        if not api_key and not api_base:
             messagebox.showerror(
-                "Ошибка API ключа", 
-                "Не найден API ключ OpenAI в переменных окружения.\n"
-                "Пожалуйста, создайте файл .env в корневой директории проекта и добавьте строку:\n"
-                "OPENAI_API_KEY=ваш_ключ_api"
+                "Ошибка конфигурации",
+                "Не найден API ключ и не задан Base URL.\n\n"
+                "Вариант 1 — OpenAI:\n"
+                "  OPENAI_API_KEY=sk-...\n\n"
+                "Вариант 2 — LM Studio / Ollama (ключ не нужен):\n"
+                "  OPENAI_API_BASE=http://127.0.0.1:1234/v1\n\n"
+                "Создайте файл .env в папке с приложением."
             )
             root.destroy()
             return

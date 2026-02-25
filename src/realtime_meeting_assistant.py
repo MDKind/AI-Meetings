@@ -22,10 +22,10 @@ class RealtimeMeetingAssistant:
                  speech_recognizer=None, 
                  chatgpt_client=None,
                  meeting_summarizer=None,
-                 temp_dir="data/temp"):
+                 temp_dir=None):
         """
         Инициализирует ассистента для встреч
-        
+
         Args:
             audio_capture: Экземпляр класса AudioCapture
             speech_recognizer: Экземпляр класса SpeechRecognizer
@@ -38,19 +38,28 @@ class RealtimeMeetingAssistant:
         self.speech_recognizer = speech_recognizer or SpeechRecognizer()
         self.chatgpt_client = chatgpt_client or ChatGPTClient()
         self.meeting_summarizer = meeting_summarizer or MeetingSummarizer(self.chatgpt_client)
-        
+
         # Создаем процессор реального времени
         self.realtime_processor = RealTimeAudioProcessor()
-        
+
         # Очереди для обмена данными между потоками
         self.audio_queue = queue.Queue()
         self.text_queue = queue.Queue()
         self.response_queue = queue.Queue()
-        
-        # Создаем директорию для временных файлов, если она не существует
+
+        # Директория для временных файлов — в LOCALAPPDATA, всегда доступна для записи
+        if temp_dir is None:
+            temp_dir = os.path.join(
+                os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
+                'AI Meetings', 'temp'
+            )
         self.temp_dir = temp_dir
-        if not os.path.exists(self.temp_dir):
+        try:
             os.makedirs(self.temp_dir, exist_ok=True)
+        except Exception as e:
+            import tempfile
+            self.temp_dir = tempfile.gettempdir()
+            print(f"Warning: temp_dir fallback to {self.temp_dir}: {e}")
         
         # Флаги состояния
         self.is_running = False

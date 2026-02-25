@@ -5,46 +5,95 @@
 ## Возможности
 
 - Запись микрофона и системного звука одновременно
-- Распознавание речи (Whisper) с определением говорящего (я / собеседник)
+- Распознавание речи (faster-whisper / CTranslate2) — 2-4x быстрее openai-whisper
 - Голосовая активация (Silero VAD) — без ложных срабатываний на фон
 - Интеграция с OpenAI API и любым OpenAI-совместимым сервером
-- Саммари встречи по кнопке (не в реальном времени)
+- Саммари встречи по кнопке
 
-## Установка
+## Установка для конечного пользователя
 
-### Вариант А — Установщик (рекомендуется)
+Запустите `dist\AI_Meetings_Setup.exe` — мастер установит приложение, FFmpeg и предложит ввести API-ключ.
+
+## Dev: сборка
+
+### Требования
+
+- Windows 10/11 64-bit
+- Python 3.13 (проверено на 3.13.7)
+- Inno Setup 6 (`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`)
+
+### Структура
 
 ```
-winget install JRSoftware.InnoSetup   # один раз
+AI_Meetings/
+├── main.py                   # Точка входа
+├── src/                      # Исходный код
+│   ├── speech_recognition.py # faster-whisper (НЕ openai-whisper)
+│   ├── vad.py                # Silero VAD + RMS fallback (torch опционален)
+│   ├── audio_capture.py      # WASAPI захват
+│   └── ...
+├── utils/                    # Конфиг и утилиты
+├── installer/
+│   ├── setup.iss             # InnoSetup скрипт (пути относительные — ..\dist и т.д.)
+│   ├── build_now.ps1         # Быстрая сборка инсталлятора (рекомендуется)
+│   ├── build_installer.ps1   # Полная сборка с загрузкой FFmpeg
+│   ├── assets/               # icon.ico, wizard.bmp, icon_small.bmp
+│   └── bundled/ffmpeg/       # ffmpeg.exe, ffprobe.exe (не в git)
+├── AI_Meetings.spec          # PyInstaller spec
+├── build_venv/               # Чистый venv для PyInstaller (не в git)
+└── dist/                     # Артефакты сборки (не в git)
+    ├── AI_Meetings.exe       # PyInstaller bundle (~613 MB)
+    └── AI_Meetings_Setup.exe # InnoSetup инсталлятор (~687 MB)
+```
+
+### Шаг 1: Создать чистый venv для сборки
+
+```powershell
+python -m venv build_venv
+build_venv\Scripts\pip install faster-whisper numpy scipy sounddevice pyaudio `
+    comtypes pycaw pydub openai python-dotenv requests pillow `
+    tiktoken numba llvmlite pyinstaller
+```
+
+**Важно:** НЕ устанавливать torch, tensorflow, keras, transformers в build_venv.
+faster-whisper использует CTranslate2 (не torch) — бандл получается меньше.
+
+### Шаг 2: Собрать AI_Meetings.exe
+
+```powershell
+build_venv\Scripts\python.exe -m PyInstaller AI_Meetings.spec --clean
+```
+
+Результат: `dist\AI_Meetings.exe` (~613 MB).
+
+### Шаг 3: Собрать инсталлятор
+
+```powershell
 cd installer
-.\build_installer.ps1                 # собрать AI_Meetings_Setup.exe
+.\build_now.ps1
 ```
 
-Запустите `dist\AI_Meetings_Setup.exe` — мастер установит Python-зависимости,
-FFmpeg и настроит `.env` с вашим API-ключом.
+Результат: `dist\AI_Meetings_Setup.exe`.
 
-### Вариант Б — Вручную
+**Как работает build_now.ps1:**
+1. Проверяет наличие `dist\AI_Meetings.exe`
+2. Создаёт `assets\` если нет (placeholder иконка/bitmap)
+3. Загружает FFmpeg в `bundled\ffmpeg\` если нет
+4. Патчит `setup.iss` (заменяет относительные пути `..\dist` → абсолютные) через `.Replace()` (не regex!)
+5. Запускает `ISCC.exe` через оператор `&` (не `Start-Process -Wait`, который зависает в bash)
+6. Временный патченный .iss сохраняется в `%TEMP%\ai_meetings_setup.iss`
 
-```bash
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-pip install openai-whisper numpy openai python-dotenv sounddevice scipy pydub pyaudio comtypes pycaw
+**Если нужно запустить ISCC вручную (из bash/CI):**
+```powershell
+# PowerShell напрямую (не через cmd.exe):
+/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe `
+    -ExecutionPolicy Bypass -NonInteractive `
+    -File I:\Work\Dev\Repos\AI_Meetings\installer\build_now.ps1
 ```
 
-Скопируйте `.env.example` → `.env` и вставьте ключ:
+## Настройка (.env)
 
-```
-OPENAI_API_KEY=sk-...
-```
-
-## Запуск
-
-```bash
-python main.py
-```
-
-## Настройка
-
-Все параметры — в файле `.env` (см. `.env.example`):
+Скопируйте `.env.example` → `.env`:
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
@@ -58,43 +107,40 @@ python main.py
 - LM Studio: `http://127.0.0.1:1234/v1`
 - Ollama: `http://127.0.0.1:11434/v1`
 
+## GPU / Устройство вывода
+
+### NVIDIA (CUDA)
+Автоматически используется если установлен CUDA-драйвер. CTranslate2 определяет наличие CUDA через `get_supported_compute_types("cuda")`.
+
+### AMD (ROCm)
+`ctranslate2` устанавливается с ROCm-поддержкой (`_rocm_sdk_core` в пакете). На Windows ROCm работает нестабильно — приложение автоматически падает на CPU если ROCm недоступен.
+
+`torch-directml` (AMD GPU через DirectX 12) не поддерживает Python 3.11+ — использовать нельзя.
+
+### CPU (fallback)
+Всегда работает. faster-whisper с int8-квантизацией на CPU в 2-4x быстрее openai-whisper.
+
+Логика выбора устройства — `src/speech_recognition.py`, функция `_select_device()`.
+
 ## Запись системного звука
 
-Для записи звука из браузера / видеозвонков нужен один из вариантов:
+Для записи звука из браузера / видеозвонков:
 
-1. **Stereo Mix** — включить в Панель управления → Звук → Запись → Показать отключённые устройства
+1. **Stereo Mix** — Панель управления → Звук → Запись → Показать отключённые устройства
 2. **VB-Audio Virtual Cable** — [vb-audio.com/Cable](https://vb-audio.com/Cable/)
-
-Подробнее: `docs/SYSTEM_AUDIO_SETUP.md`, `scripts/setup_cable_audio.bat`
-
-## Структура проекта
-
-```
-AI_Meetings/
-├── main.py              # Точка входа
-├── src/                 # Исходный код (ui, audio_capture, vad, speech_recognition, chatgpt_client...)
-├── utils/               # Конфиг и утилиты
-├── installer/           # InnoSetup скрипт + build_installer.ps1
-├── scripts/             # BAT-скрипты для настройки аудио
-├── tools/               # Диагностика (diagnose_audio_devices.py, check_dependencies.py)
-└── docs/                # Документация по настройке
-```
 
 ## Решение проблем
 
 ```bash
 python tools\diagnose_audio_devices.py   # список аудио устройств
 python tools\check_dependencies.py       # проверка зависимостей
-python tools\test_startup.py             # тест запуска
 ```
 
 - Нет звука из браузера → `docs/RECORD_YOUTUBE_AUDIO.md`
 - Ошибки comtypes/pycaw → `docs/COMTYPES_ERROR_FIX.md`
-- Общие проблемы → `docs/TROUBLESHOOTING_SUMMARY.md`
 
-## Требования
+## Известные ограничения
 
-- Windows 10/11 (64-bit)
-- Python 3.8+
-- Микрофон
-- ~1 ГБ свободного места (PyTorch + модели Whisper)
+- Windows only (WASAPI, comtypes)
+- Модели Whisper скачиваются при первом запуске (~75 MB для `base`) в `~/.cache/huggingface/`
+- torch не включён в бандл — VAD (vad.py) использует RMS-детектор вместо Silero если torch недоступен

@@ -4,7 +4,7 @@ import threading
 import os
 import time
 import datetime
-from utils.config import UI_SETTINGS, SPEECH_RECOGNITION
+from utils.config import UI_SETTINGS, SPEECH_RECOGNITION, CHATGPT_SETTINGS
 
 class AudioAssistantUI:
     """
@@ -49,7 +49,11 @@ class AudioAssistantUI:
 
         # Инициализируем список устройств
         self.refresh_devices()
-        
+
+        # Если base_url уже задан в .env — подгружаем модели с сервера при старте
+        if self._get_default_api_base_url():
+            self.root.after(500, self.apply_api_settings)
+
         # Устанавливаем обработчик закрытия окна
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
@@ -135,10 +139,11 @@ class AudioAssistantUI:
         ttk.Label(settings_frame, text="Модель LLM:", font=default_font).grid(row=0, column=4, padx=(15, 5), pady=5, sticky="w")
         self.chatgpt_model_combobox = ttk.Combobox(
             settings_frame,
-            values=["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "llama-3.2-3b-instruct", "mistral-7b-instruct"],
+            values=["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
             width=22, font=default_font
         )
-        self.chatgpt_model_combobox.current(0)  # gpt-4o по умолчанию
+        default_model = CHATGPT_SETTINGS.get('default_model', 'gpt-4o')
+        self.chatgpt_model_combobox.set(default_model)
         self.chatgpt_model_combobox.grid(row=0, column=5, padx=5, pady=5, sticky="w")
 
         # Строка настроек API
@@ -234,6 +239,7 @@ class AudioAssistantUI:
     def apply_api_settings(self):
         """
         Применяет новые настройки API (base URL и модель) к ChatGPT клиенту без перезапуска.
+        При смене Base URL подгружает список доступных моделей с сервера.
         """
         if not self.chatgpt_client:
             return
@@ -250,8 +256,23 @@ class AudioAssistantUI:
             if base_url:
                 client_kwargs['base_url'] = base_url
 
-            self.chatgpt_client.client = OpenAI(**client_kwargs)
+            new_client = OpenAI(**client_kwargs)
+            self.chatgpt_client.client = new_client
             self.chatgpt_client.base_url = base_url
+
+            # Подгружаем список моделей с сервера
+            try:
+                models_response = new_client.models.list()
+                model_ids = sorted([m.id for m in models_response.data])
+                if model_ids:
+                    self.chatgpt_model_combobox['values'] = model_ids
+                    # Если текущая модель не в списке — берём первую
+                    if model not in model_ids:
+                        self.chatgpt_model_combobox.set(model_ids[0])
+                        model = model_ids[0]
+            except Exception:
+                pass  # Сервер недоступен или не поддерживает /models — оставляем как есть
+
             if model:
                 self.chatgpt_client.model = model
 

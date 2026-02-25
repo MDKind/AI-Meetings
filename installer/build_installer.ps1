@@ -32,9 +32,10 @@ Write-Host ""
 
 $IsccPaths = @(
     "iscc",   # if in PATH
-    "${env:ProgramFiles(x86)}\Inno Setup 6\iscc.exe",
-    "${env:ProgramFiles}\Inno Setup 6\iscc.exe",
-    "C:\Program Files (x86)\Inno Setup 6\iscc.exe"
+    "${env:LOCALAPPDATA}\Programs\Inno Setup 6\ISCC.exe",
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+    "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 )
 
 $IsccExe = $null

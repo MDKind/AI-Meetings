@@ -18,7 +18,7 @@ AUDIO_SETTINGS = {
 SPEECH_RECOGNITION = {
     'default_model': os.getenv('WHISPER_MODEL', 'base'),      # Размер модели Whisper (tiny, base, small, medium, large)
     'default_language': os.getenv('WHISPER_LANGUAGE', 'ru'),  # Язык по умолчанию (ru, en, auto)
-    'temp_dir': os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'temp')
+    'temp_dir': os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'AI Meetings', 'temp')
 }
 
 # Настройки для ChatGPT / OpenAI-compatible API

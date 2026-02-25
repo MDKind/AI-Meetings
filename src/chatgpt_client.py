@@ -26,21 +26,26 @@ class ChatGPTClient:
             base_url (str, optional): Кастомный URL API (например http://127.0.0.1:1234/v1 для LM Studio).
                                       Если None, берется из конфигурации.
         """
-        # Получаем API ключ
-        if api_key is None:
-            api_key = CHATGPT_SETTINGS.get('api_key') or os.getenv("OPENAI_API_KEY")
-            if api_key is None:
-                raise ValueError(
-                    "Необходимо указать API ключ OpenAI через параметр api_key, "
-                    "переменную окружения OPENAI_API_KEY или в файле конфигурации."
-                )
-
         # Определяем base_url: параметр > конфиг > None (стандартный OpenAI)
         if base_url is None:
             base_url = CHATGPT_SETTINGS.get('api_base_url') or None
         # Пустую строку трактуем как «не задан»
         if base_url == '':
             base_url = None
+
+        # Получаем API ключ.
+        # Для локальных серверов (LM Studio / Ollama) ключ не нужен —
+        # используем placeholder "local" чтобы OpenAI SDK не падал.
+        if api_key is None:
+            api_key = CHATGPT_SETTINGS.get('api_key') or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            if base_url:
+                api_key = "local"
+            else:
+                raise ValueError(
+                    "Необходимо указать OPENAI_API_KEY (для OpenAI) "
+                    "или OPENAI_API_BASE (для LM Studio / Ollama) в файле .env."
+                )
 
         client_kwargs = {'api_key': api_key}
         if base_url:
