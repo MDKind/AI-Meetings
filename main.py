@@ -10,8 +10,15 @@ from dotenv import load_dotenv
 # Добавляем текущую директорию в PATH для импорта модулей
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Загружаем переменные окружения из .env файла
-load_dotenv()
+# Загружаем .env из %LOCALAPPDATA%\AI Meetings\.env
+# (туда же где temp-директория — доступно на запись даже при установке в Program Files)
+_env_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'AI Meetings')
+os.makedirs(_env_dir, exist_ok=True)
+_env_path = os.path.join(_env_dir, '.env')
+# Если в LOCALAPPDATA нет .env — пробуем рядом с exe (для dev-запуска)
+if not os.path.exists(_env_path):
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+load_dotenv(_env_path)
 
 def main():
     """
@@ -76,11 +83,6 @@ def main():
         from src.audio_capture import AudioCapture
         audio_capture = AudioCapture()
         
-        update_progress(0.2, "Инициализация процессора реального времени...")
-        
-        from src.realtime_processor import RealTimeAudioProcessor
-        realtime_processor = RealTimeAudioProcessor()
-        
         update_progress(0.4, "Загрузка модели распознавания речи...")
         
         from src.speech_recognition import SpeechRecognizer
@@ -120,10 +122,10 @@ def main():
         ui = AudioAssistantUI(
             app_root,
             audio_capture=audio_capture,
-            speech_recognizer=speech_recognizer, 
+            speech_recognizer=speech_recognizer,
             chatgpt_client=chatgpt_client,
-            realtime_processor=realtime_processor,
-            realtime_assistant=realtime_assistant
+            realtime_assistant=realtime_assistant,
+            env_path=_env_path
         )
         
         # Запускаем главный цикл

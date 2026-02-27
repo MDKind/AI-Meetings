@@ -1,17 +1,16 @@
 import tkinter as tk
-from tkinter import scrolledtext, ttk, messagebox, filedialog
+from tkinter import scrolledtext, ttk, messagebox
 import threading
-import os
 import time
 import datetime
-from utils.config import UI_SETTINGS, SPEECH_RECOGNITION, CHATGPT_SETTINGS
+from utils.config import UI_SETTINGS, CHATGPT_SETTINGS
 
 class AudioAssistantUI:
     """
     Класс для создания пользовательского интерфейса аудио-ассистента
     """
     def __init__(self, root, audio_capture=None, speech_recognizer=None, chatgpt_client=None,
-                 realtime_processor=None, realtime_assistant=None):
+                 realtime_assistant=None, env_path=None):
         """
         Инициализирует пользовательский интерфейс
         
@@ -31,8 +30,8 @@ class AudioAssistantUI:
         self.audio_capture = audio_capture
         self.speech_recognizer = speech_recognizer
         self.chatgpt_client = chatgpt_client
-        self.realtime_processor = realtime_processor
         self.realtime_assistant = realtime_assistant
+        self.env_path = env_path  # путь к .env для сохранения настроек
         
         # Флаги состояния
         self.is_recording = False
@@ -98,28 +97,6 @@ class AudioAssistantUI:
         ttk.Button(refresh_frame, text="Обновить список устройств", 
                   command=self.refresh_devices, width=25).pack(pady=5)
         
-        # Режим работы
-        mode_frame = ttk.Frame(control_frame)
-        mode_frame.pack(fill="x", pady=5)
-        
-        ttk.Label(mode_frame, text="Режим записи:", font=default_font).pack(side="left", padx=5)
-        
-        # Переключатель режима
-        self.mode_var = tk.StringVar(value="enhanced")
-        ttk.Radiobutton(mode_frame, text="Улучшенный (Windows WASAPI)", variable=self.mode_var, 
-                       value="enhanced").pack(side="left", padx=5)
-        ttk.Radiobutton(mode_frame, text="Стандартный (Stereo Mix)", variable=self.mode_var, 
-                       value="standard").pack(side="left", padx=5)
-        ttk.Radiobutton(mode_frame, text="Прямой захват звука", variable=self.mode_var, 
-                      value="advanced").pack(side="left", padx=5)
-        ttk.Radiobutton(mode_frame, text="Универсальный режим", variable=self.mode_var, 
-                      value="universal").pack(side="left", padx=5)
-        
-        # Кнопка информации о режимах
-        info_button = ttk.Button(mode_frame, text="?", width=2, 
-                                command=self.show_recording_info)
-        info_button.pack(side="left", padx=5)
-        
         # Настройки распознавания
         settings_frame = ttk.Frame(control_frame)
         settings_frame.pack(fill="x", pady=5)
@@ -137,13 +114,18 @@ class AudioAssistantUI:
         self.language_combobox.grid(row=0, column=3, padx=5, pady=5, sticky="w")
         
         ttk.Label(settings_frame, text="Модель LLM:", font=default_font).grid(row=0, column=4, padx=(15, 5), pady=5, sticky="w")
+        # Если задан base_url — комбобокс будет заполнен из сервера после подключения.
+        # Если нет — показываем стандартные OpenAI модели.
+        _has_base_url = bool(CHATGPT_SETTINGS.get('api_base_url', ''))
+        _initial_llm_values = [] if _has_base_url else ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
         self.chatgpt_model_combobox = ttk.Combobox(
             settings_frame,
-            values=["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+            values=_initial_llm_values,
             width=22, font=default_font
         )
-        default_model = CHATGPT_SETTINGS.get('default_model', 'gpt-4o')
-        self.chatgpt_model_combobox.set(default_model)
+        if not _has_base_url:
+            default_model = CHATGPT_SETTINGS.get('default_model', 'gpt-4o')
+            self.chatgpt_model_combobox.set(default_model)
         self.chatgpt_model_combobox.grid(row=0, column=5, padx=5, pady=5, sticky="w")
 
         # Строка настроек API
@@ -169,16 +151,10 @@ class AudioAssistantUI:
                                       command=self.toggle_recording, width=15)
         self.start_button.pack(side="left", padx=5)
         
-        ttk.Button(buttons_frame, text="Сгенерировать саммари", 
+        ttk.Button(buttons_frame, text="Сгенерировать саммари",
                   command=self.generate_summary, width=20).pack(side="left", padx=5)
-        
-        ttk.Button(buttons_frame, text="Сохранить разговор", 
-                  command=self.save_conversation, width=15).pack(side="left", padx=5)
-        
-        ttk.Button(buttons_frame, text="Загрузить разговор", 
-                  command=self.load_conversation, width=15).pack(side="left", padx=5)
-        
-        ttk.Button(buttons_frame, text="Очистить историю", 
+
+        ttk.Button(buttons_frame, text="Очистить историю",
                   command=self.clear_history, width=15).pack(side="left", padx=5)
         
         # Создаем разделенное окно для одновременного отображения распознанного текста и ответов ChatGPT
@@ -236,69 +212,129 @@ class AudioAssistantUI:
         from utils.config import CHATGPT_SETTINGS
         return CHATGPT_SETTINGS.get('api_base_url', '') or ''
 
+    def _save_env(self, api_key, api_base, model):
+        """Сохраняет настройки API в .env файл."""
+        if not self.env_path:
+            return
+        lines = []
+        try:
+            with open(self.env_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception:
+            pass
+
+        def _set(key, value):
+            """Обновляет или добавляет строку key=value, раскомментируя при необходимости."""
+            found = False
+            for i, line in enumerate(lines):
+                stripped = line.lstrip('# \t')
+                if stripped.startswith(key + '='):
+                    lines[i] = f'{key}={value}\n' if value else f'# {key}=\n'
+                    found = True
+                    break
+            if not found:
+                if value:
+                    lines.append(f'{key}={value}\n')
+
+        if api_key is not None:  # None = не трогать существующий ключ
+            _set('OPENAI_API_KEY', api_key)
+        _set('OPENAI_API_BASE', api_base or '')
+        _set('CHATGPT_MODEL', model or '')
+
+        try:
+            with open(self.env_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+        except Exception as e:
+            print(f"Не удалось сохранить .env: {e}")
+
     def apply_api_settings(self):
         """
         Применяет новые настройки API (base URL и модель) к ChatGPT клиенту без перезапуска.
-        При смене Base URL подгружает список доступных моделей с сервера.
+        Автоматически определяет тип API (OpenAI / LM Studio Runtime).
+        Загрузка моделей выполняется в фоновом потоке.
+        Сохраняет настройки в .env.
         """
         if not self.chatgpt_client:
             return
 
-        from openai import OpenAI
-        import os
+        from src.chatgpt_client import _is_lmstudio_runtime
 
         base_url = self.api_base_url_var.get().strip() or None
         model = self.chatgpt_model_combobox.get().strip()
 
         try:
-            api_key = self.chatgpt_client.client.api_key
-            client_kwargs = {'api_key': api_key}
-            if base_url:
-                client_kwargs['base_url'] = base_url
-
-            new_client = OpenAI(**client_kwargs)
-            self.chatgpt_client.client = new_client
+            # Обновляем параметры существующего клиента (не пересоздаём — история сохраняется)
             self.chatgpt_client.base_url = base_url
-
-            # Подгружаем список моделей с сервера
-            try:
-                models_response = new_client.models.list()
-                model_ids = sorted([m.id for m in models_response.data])
-                if model_ids:
-                    self.chatgpt_model_combobox['values'] = model_ids
-                    # Если текущая модель не в списке — берём первую
-                    if model not in model_ids:
-                        self.chatgpt_model_combobox.set(model_ids[0])
-                        model = model_ids[0]
-            except Exception:
-                pass  # Сервер недоступен или не поддерживает /models — оставляем как есть
-
+            self.chatgpt_client._lmstudio_runtime = _is_lmstudio_runtime(base_url)
             if model:
                 self.chatgpt_client.model = model
 
+            # Если переключились на LM Studio Runtime — пересоздаём внутренний OpenAI client
+            # (или убираем его если он уже не нужен)
+            if self.chatgpt_client._lmstudio_runtime:
+                self.chatgpt_client.client = None
+            else:
+                from openai import OpenAI
+                api_key = self.chatgpt_client.api_key or "local"
+                kw = {'api_key': api_key}
+                if base_url:
+                    kw['base_url'] = base_url
+                self.chatgpt_client.client = OpenAI(**kw)
+
+            # Сохраняем в .env сразу
+            self._save_env(api_key=None, api_base=base_url or '', model=model or '')
+
+            # Статус
             if base_url:
-                self.api_status_label.config(text=f"✓ {base_url}", foreground="green")
+                mode = "LM Studio Runtime" if _is_lmstudio_runtime(base_url) else "OpenAI-compatible"
+                self.api_status_label.config(text=f"✓ {base_url} ({mode})", foreground="green")
             else:
                 self.api_status_label.config(text="✓ OpenAI API", foreground="green")
+
+            # Загружаем модели с сервера в фоне
+            if base_url:
+                threading.Thread(target=self._fetch_models, args=(base_url,), daemon=True).start()
+
         except Exception as e:
             self.api_status_label.config(text=f"Ошибка: {e}", foreground="red")
 
-    def show_recording_info(self):
-        """
-        Показывает информацию о режимах записи
-        """
-        messagebox.showinfo(
-            "Режимы записи",
-            "Улучшенный режим (Windows WASAPI): Использует нативные Windows API для захвата системного звука. "
-            "Обеспечивает наилучшее качество и надежность на Windows 10/11. Рекомендуется для большинства пользователей.\n\n"
-            "Стандартный режим: Использует микрофон и Stereo Mix (если доступен) для записи.\n\n"
-            "Прямой захват звука: Пытается напрямую захватывать звук с устройства вывода. "
-            "Работает не на всех системах и может требовать дополнительных настроек. "
-            "Рекомендуется, если Stereo Mix недоступен.\n\n"
-            "Универсальный режим: Автоматически выбирает оптимальный способ захвата звука "
-            "для вашей системы. Пробует разные методы, включая продвинутые техники для захвата системного звука."
-        )
-    
+    def _fetch_models(self, base_url):
+        """Загружает список моделей с сервера в фоновом потоке и обновляет комбобокс."""
+        import requests as _requests
+        try:
+            models_url = base_url.rstrip('/') + '/models'
+            resp = _requests.get(models_url, timeout=5)
+            print(f"Fetch models: {models_url} -> {resp.status_code}")
+            if resp.status_code == 200:
+                data = resp.json()
+                print(f"Models response keys: {list(data.keys())}")
+                # OpenAI/LM Studio: {"data": [{"id": "..."}]}
+                model_ids = [m['id'] for m in data.get('data', []) if 'id' in m]
+                # LM Studio Runtime может вернуть {"models": [...]} или просто список
+                if not model_ids and 'models' in data:
+                    model_ids = [m.get('id') or m.get('name') for m in data['models'] if isinstance(m, dict)]
+                    model_ids = [m for m in model_ids if m]
+                if not model_ids and isinstance(data, list):
+                    model_ids = [m.get('id') or m.get('name') for m in data if isinstance(m, dict)]
+                    model_ids = [m for m in model_ids if m]
+                model_ids = sorted(model_ids)
+                print(f"Found models: {model_ids}")
+                if model_ids:
+                    self.root.after(0, self._update_model_combobox, model_ids)
+        except Exception as e:
+            print(f"Ошибка загрузки моделей: {e}")
+
+    def _update_model_combobox(self, model_ids):
+        """Обновляет комбобокс моделей в главном потоке."""
+        current = self.chatgpt_model_combobox.get()
+        self.chatgpt_model_combobox['values'] = model_ids
+        if current not in model_ids:
+            self.chatgpt_model_combobox.set(model_ids[0])
+            if self.chatgpt_client:
+                self.chatgpt_client.model = model_ids[0]
+            # Сохраняем обновлённую модель
+            self._save_env(api_key=None, api_base=self.chatgpt_client.base_url or '', model=model_ids[0])
+
     def refresh_devices(self):
         """
         Обновляет списки доступных аудио устройств
@@ -401,42 +437,16 @@ class AudioAssistantUI:
         if chatgpt_model != self.chatgpt_client.model:
             self.chatgpt_client.model = chatgpt_model
         
-        # Запускаем запись в зависимости от выбранного режима
         try:
-            # Получаем режим записи
-            mode = self.mode_var.get()
-            
-            if mode == "enhanced":
-                # Используем улучшенный режим с Windows WASAPI
-                self.audio_capture.start_enhanced_recording(
-                    input_device_index=self.input_device_index, 
-                    output_device_index=self.output_device_index
-                )
-                mode_text = "с Windows WASAPI"
-            elif mode == "advanced":
-                # Используем прямой захват звука
-                self.audio_capture.start_dual_recording(
-                    input_device_index=self.input_device_index, 
-                    output_device_index=self.output_device_index
-                )
-                mode_text = "с прямым захватом звука"
-            elif mode == "universal":
-                # Используем универсальный режим
-                self.audio_capture.start_universal_recording(
-                    input_device_index=self.input_device_index, 
-                    output_device_index=self.output_device_index
-                )
-                mode_text = "с универсальным захватом звука"
-            else:
-                # Используем стандартный режим (через Stereo Mix)
-                self.audio_capture.start_recording_with_both(
-                    input_device_index=self.input_device_index, 
-                    output_device_index=self.output_device_index
-                )
-                mode_text = "стандартный"
-            
+            self.audio_capture.start_enhanced_recording(
+                input_device_index=self.input_device_index,
+                output_device_index=self.output_device_index
+            )
+
             self.is_recording = True
-            
+            if self.realtime_assistant:
+                self.assistant_active = True
+
             # Запускаем обработку в отдельном потоке
             self.is_processing = True
             self.processing_thread = threading.Thread(target=self.process_audio)
@@ -448,7 +458,7 @@ class AudioAssistantUI:
             
             # Обновляем UI
             self.start_button.config(text="Остановить запись")
-            self.status_var.set(f"Запись и обработка аудио (режим {mode_text})...")
+            self.status_var.set("Запись и обработка аудио...")
         except Exception as e:
             messagebox.showerror("Ошибка записи", f"Не удалось начать запись: {e}")
             self.is_recording = False
@@ -526,12 +536,6 @@ class AudioAssistantUI:
             self.audio_level_canvas.delete("all")
             self.audio_level_canvas.create_rectangle(0, 0, level, 15, fill=color, outline="")
             
-            # При использовании двойного захвата, можем показать дополнительный индикатор
-            mode = getattr(self, 'mode_var', None)
-            if mode and mode.get() == "advanced" and hasattr(self.audio_capture, 'output_frames') and self.audio_capture.output_frames:
-                # Отображаем индикатор для системного звука на том же холсте, но меньшего размера
-                system_level = min(100, len(self.audio_capture.output_frames) * 5)  # Простая визуализация
-                self.audio_level_canvas.create_rectangle(0, 12, system_level, 15, fill="orange", outline="")
             
             # Планируем следующее обновление
             self.root.after(100, self.update_audio_level)
@@ -614,8 +618,26 @@ class AudioAssistantUI:
 
         # Генерируем саммари в фоновом потоке, чтобы не блокировать UI
         def _do_summary():
-            summary = self.chatgpt_client.generate_meeting_summary()
-            self.root.after(0, self._show_summary, summary)
+            from utils.storage import storage
+            summary_text = self.chatgpt_client.generate_meeting_summary()
+            # Сохраняем в storage
+            try:
+                summary_dict = {
+                    "title": getattr(self, '_meeting_title', None),
+                    "date": __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_seconds": 0,
+                    "summary": summary_text,
+                    "transcript": [
+                        {"role": m["role"], "content": m["content"],
+                         "speaker": m.get("speaker", "unknown"),
+                         "timestamp": m.get("timestamp", "")}
+                        for m in self.chatgpt_client.conversation_history
+                    ],
+                }
+                storage.save_summary(summary_dict)
+            except Exception as e:
+                print(f"Storage: не удалось сохранить саммари: {e}")
+            self.root.after(0, self._show_summary, summary_text)
 
         threading.Thread(target=_do_summary, daemon=True).start()
 
@@ -626,90 +648,8 @@ class AudioAssistantUI:
         self.summary_text.insert(tk.END, summary)
         self.summary_text.configure(state="disabled")
         self.status_var.set("Саммари встречи сгенерировано")
-    
-    def save_conversation(self):
-        """
-        Сохраняет историю разговора в файл
-        """
-        if not self.chatgpt_client:
-            messagebox.showerror("Ошибка", "ChatGPT клиент не инициализирован")
-            return
-            
-        # Проверяем, есть ли история разговора
-        if not self.chatgpt_client.conversation_history:
-            messagebox.showinfo("Информация", "История разговора пуста. Нечего сохранять.")
-            return
-            
-        # Запрашиваем имя файла для сохранения
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON файлы", "*.json"), ("Все файлы", "*.*")],
-            title="Сохранить историю разговора"
-        )
-        
-        if file_path:
-            # Сохраняем историю
-            filename = self.chatgpt_client.save_conversation(file_path)
-            self.status_var.set(f"История разговора сохранена в {filename}")
-            
-            # Если есть саммари, предлагаем сохранить его отдельно
-            if self.summary_text.get(1.0, tk.END).strip():
-                if messagebox.askyesno("Сохранить саммари", "Хотите сохранить саммари отдельно в текстовый файл?"):
-                    summary_path = filedialog.asksaveasfilename(
-                        defaultextension=".txt",
-                        filetypes=[("Текстовые файлы", "*.txt"), ("Все файлы", "*.*")],
-                        title="Сохранить саммари встречи"
-                    )
-                    
-                    if summary_path:
-                        with open(summary_path, 'w', encoding='utf-8') as f:
-                            f.write(self.summary_text.get(1.0, tk.END))
-                        self.status_var.set(f"Саммари сохранено в {summary_path}")
-    
-    def load_conversation(self):
-        """
-        Загружает историю разговора из файла
-        """
-        if not self.chatgpt_client:
-            messagebox.showerror("Ошибка", "ChatGPT клиент не инициализирован")
-            return
-            
-        # Запрашиваем имя файла для загрузки
-        file_path = filedialog.askopenfilename(
-            filetypes=[("JSON файлы", "*.json"), ("Все файлы", "*.*")],
-            title="Загрузить историю разговора"
-        )
-        
-        if file_path:
-            # Очищаем текущую историю
-            if self.chatgpt_client.conversation_history and not messagebox.askyesno(
-                "Подтверждение", "Текущая история будет перезаписана. Продолжить?"
-            ):
-                return
-                
-            # Загружаем историю
-            if self.chatgpt_client.load_conversation(file_path):
-                self.status_var.set(f"История разговора загружена из {file_path}")
-                
-                # Очищаем текущие поля
-                self.transcription_text.configure(state="normal")
-                self.transcription_text.delete(1.0, tk.END)
-                
-                self.chat_text.configure(state="normal")
-                self.chat_text.delete(1.0, tk.END)
-                
-                # Отображаем загруженную историю
-                for message in self.chatgpt_client.conversation_history:
-                    if message["role"] == "user":
-                        self.update_transcription(message["content"])
-                    elif message["role"] == "assistant":
-                        self.update_chat(message["content"])
-                
-                # Предлагаем сгенерировать саммари
-                if messagebox.askyesno("Генерация саммари", "Хотите сгенерировать саммари для загруженной истории?"):
-                    self.generate_summary()
-            else:
-                messagebox.showerror("Ошибка", "Не удалось загрузить историю разговора")
+        # Очищаем буфер после сохранения саммари
+        self.transcription_buffer = []
     
     def clear_history(self):
         """
@@ -744,26 +684,20 @@ class AudioAssistantUI:
     
     def generate_summary_with_assistant(self):
         """
-        Генерирует саммари встречи, используя ассистента реального времени
+        Генерирует саммари встречи через ассистента реального времени (в фоновом потоке).
         """
         if not self.realtime_assistant:
-            # Если ассистент не инициализирован, используем стандартный метод
             self.generate_summary()
             return
-            
+
         self.status_var.set("Генерация саммари встречи через ассистента...")
-        self.root.update()
-        
-        # Генерируем саммари с помощью ассистента реального времени
-        summary = self.realtime_assistant.generate_meeting_summary()
-        
-        # Отображаем саммари
-        self.summary_text.configure(state="normal")
-        self.summary_text.delete(1.0, tk.END)
-        self.summary_text.insert(tk.END, summary)
-        self.summary_text.configure(state="disabled")
-        
-        self.status_var.set("Саммари встречи сгенерировано через ассистента")
+
+        def _do():
+            summary = self.realtime_assistant.generate_meeting_summary()
+            self.root.after(0, self._show_summary, summary)
+            self.root.after(0, lambda: self.status_var.set("Саммари встречи сгенерировано через ассистента"))
+
+        threading.Thread(target=_do, daemon=True).start()
     
     def process_audio(self):
         """
@@ -791,9 +725,9 @@ class AudioAssistantUI:
                     # Формируем метку говорящего
                     speaker_label = "Я" if speaker == "local" else "Собеседник"
 
-                    # Добавляем в ChatGPT историю с пометкой говорящего
+                    # Добавляем в ChatGPT историю с пометкой говорящего и speaker
                     msg_content = f"[{speaker_label}]: {transcription}"
-                    self.chatgpt_client.add_message(msg_content, role="user")
+                    self.chatgpt_client.add_message(msg_content, role="user", speaker=speaker)
 
                     # Накапливаем в локальный буфер
                     self.transcription_buffer.append({
@@ -817,11 +751,6 @@ class AudioAssistantUI:
         # Останавливаем запись, если она активна
         if self.is_recording:
             self.stop_recording()
-        
-        # Если есть несохраненная история, предлагаем сохранить
-        if self.chatgpt_client and self.chatgpt_client.conversation_history:
-            if messagebox.askyesno("Сохранение", "Сохранить историю разговора перед выходом?"):
-                self.save_conversation()
         
         # Закрываем аудио ресурсы
         if self.audio_capture:

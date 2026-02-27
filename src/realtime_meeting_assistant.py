@@ -2,11 +2,9 @@ import os
 import threading
 import time
 import queue
-import wave
 from datetime import datetime
 
 from src.audio_capture import AudioCapture
-from src.realtime_processor import RealTimeAudioProcessor
 from src.speech_recognition import SpeechRecognizer
 from src.chatgpt_client import ChatGPTClient
 from src.meeting_summarizer import MeetingSummarizer
@@ -39,11 +37,7 @@ class RealtimeMeetingAssistant:
         self.chatgpt_client = chatgpt_client or ChatGPTClient()
         self.meeting_summarizer = meeting_summarizer or MeetingSummarizer(self.chatgpt_client)
 
-        # Создаем процессор реального времени
-        self.realtime_processor = RealTimeAudioProcessor()
-
         # Очереди для обмена данными между потоками
-        self.audio_queue = queue.Queue()
         self.text_queue = queue.Queue()
         self.response_queue = queue.Queue()
 
@@ -108,33 +102,9 @@ class RealtimeMeetingAssistant:
             
             # Запускаем захват аудио
             print("Запуск захвата аудио с микрофона и системного звука...")
-            
-            # Пробуем запустить запись с наушников
-            try:
-                self.audio_capture.start_universal_recording(
-                    input_device_index=input_device_index,
-                    output_device_index=output_device_index
-                )
-            except Exception as e:
-                print(f"Ошибка при запуске универсального захвата: {e}")
-                print("Пробуем альтернативный метод...")
-                try:
-                    self.audio_capture.start_dual_recording(
-                        input_device_index=input_device_index,
-                        output_device_index=output_device_index
-                    )
-                except Exception as e2:
-                    print(f"Ошибка при запуске двойного захвата: {e2}")
-                    print("Пробуем стандартный метод...")
-                    self.audio_capture.start_recording_with_both(
-                        input_device_index=input_device_index,
-                        output_device_index=output_device_index
-                    )
-            
-            # Запускаем обработчик реального времени с тем же устройством
-            self.realtime_processor.start_processing(
-                device_index=input_device_index,
-                on_segment_ready=self._on_audio_segment
+            self.audio_capture.start_enhanced_recording(
+                input_device_index=input_device_index,
+                output_device_index=output_device_index
             )
             
             # Запускаем потоки обработки
@@ -183,12 +153,6 @@ class RealtimeMeetingAssistant:
         except Exception as e:
             print(f"Ошибка при остановке захвата аудио: {e}")
         
-        # Останавливаем процессор реального времени
-        try:
-            self.realtime_processor.stop_processing()
-        except Exception as e:
-            print(f"Ошибка при остановке процессора: {e}")
-        
         # Ждем завершения потоков
         for thread in self.threads:
             if thread.is_alive():
@@ -199,78 +163,45 @@ class RealtimeMeetingAssistant:
     
     def generate_meeting_summary(self, title=None):
         """
-        Генерирует саммари встречи
-        
-        Args:
-            title (str): Название встречи (опционально)
-            
+        Генерирует саммари встречи и сохраняет через storage.
+
         Returns:
-            dict: Словарь с саммари и метаданными
+            str: Текст саммари (для отображения в UI)
         """
         if title:
             self.meeting_title = title
-            
-        # Создаем саммари с помощью summarizer
-        summary = self.meeting_summarizer.generate_summary(title=self.meeting_title)
-        
-        # Сохраняем в файл
-        filename = self.meeting_summarizer.save_summary_to_file(summary)
-        
-        return summary, filename
-    
-    def save_session(self, filename=None):
-        """
-        Сохраняет текущую сессию встречи
-        
-        Args:
-            filename (str): Имя файла (опционально)
-            
-        Returns:
-            str: Имя файла, в который сохранена сессия
-        """
-        # Сохраняем историю разговора
-        return self.chatgpt_client.save_conversation(filename)
-    
-    def _on_audio_segment(self, segment):
-        """
-        Обрабатывает аудио сегмент от процессора реального времени
-        
-        Args:
-            segment: Аудио сегмент (список байтовых данных)
-        """
-        if not self.is_running:
-            return
-            
-        # Добавляем сегмент в очередь для обработки
-        self.audio_queue.put(segment)
-        
-        # Сохраняем сегмент во временный файл для отладки
-        if AUDIO_SETTINGS.get('save_segments', False):
-            try:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = os.path.join(self.temp_dir, f"segment_{timestamp}.wav")
-                
-                with wave.open(filename, 'wb') as wf:
-                    wf.setnchannels(AUDIO_SETTINGS['channels'])
-                    wf.setsampwidth(2)  # 16-bit
-                    wf.setframerate(AUDIO_SETTINGS['rate'])
-                    wf.writeframes(b''.join(segment))
-                
-                print(f"Сегмент сохранен в {filename}")
-            except Exception as e:
-                print(f"Ошибка при сохранении сегмента: {e}")
+
+        summary_dict = self.meeting_summarizer.generate_summary(title=self.meeting_title)
+
+        # Сохраняем через storage (вместо save_summary_to_file)
+        try:
+            from utils.storage import storage
+            storage.save_summary(summary_dict)
+        except Exception as e:
+            print(f"Storage: не удалось сохранить саммари: {e}")
+
+        return summary_dict.get("summary", "")
     
     def _audio_to_text_thread(self):
         """
         Поток для преобразования аудио в текст
         """
         print("Запущен поток преобразования аудио в текст")
-        
+
         while self.is_running:
             try:
-                # Получаем сегмент из очереди с таймаутом
-                segment = self.audio_queue.get(timeout=0.5)
-                
+                item = self.audio_capture.get_next_audio_segment()
+                if item is None:
+                    time.sleep(0.1)
+                    continue
+
+                if isinstance(item, dict):
+                    segment = item.get("frames", item)
+                    speaker = item.get("speaker", "local")
+                else:
+                    segment = item
+                    speaker = "local"
+
                 # Распознаем текст
                 print("Распознавание речи...")
                 text = self.speech_recognizer.transcribe_audio_data(
@@ -278,33 +209,21 @@ class RealtimeMeetingAssistant:
                     sample_rate=AUDIO_SETTINGS['rate'],
                     language=SPEECH_RECOGNITION['default_language']
                 )
-                
-                # Проверяем, что текст не пустой
+
                 if text and text.strip():
-                    print(f"Распознано: {text}")
-                    
-                    # Добавляем в транскрипцию встречи
-                    transcript_entry = {
+                    print(f"Распознано [{speaker}]: {text}")
+
+                    self.meeting_transcription.append({
                         "text": text,
-                        "timestamp": datetime.now().strftime("%H:%M:%S")
-                    }
-                    self.meeting_transcription.append(transcript_entry)
-                    
-                    # Добавляем в очередь для отправки в ChatGPT
+                        "speaker": speaker,
+                        "timestamp": datetime.now().isoformat(),
+                    })
                     self.text_queue.put(text)
-                    
-                    # Вызываем колбэк, если он установлен
                     if self.on_transcription:
                         self.on_transcription(text)
                 else:
                     print("Пустой результат распознавания")
-                
-                # Помечаем задачу как выполненную
-                self.audio_queue.task_done()
-                
-            except queue.Empty:
-                # Очередь пуста, продолжаем ожидание
-                pass
+
             except Exception as e:
                 print(f"Ошибка при преобразовании аудио в текст: {e}")
                 if self.on_error:
@@ -445,17 +364,11 @@ if __name__ == "__main__":
         finally:
             # Останавливаем ассистента
             assistant.stop()
-            
+
             # Генерируем саммари
             print("\nГенерация саммари встречи...")
-            summary, filename = assistant.generate_meeting_summary()
-            
-            print(f"\nСаммари встречи сохранено в {filename}")
+            summary_text = assistant.generate_meeting_summary()
             print("\nСодержимое саммари:")
-            print(summary['summary'])
-            
-            # Сохраняем сессию
-            session_file = assistant.save_session()
-            print(f"\nСессия сохранена в {session_file}")
+            print(summary_text)
     else:
         print("Не удалось запустить ассистента.")

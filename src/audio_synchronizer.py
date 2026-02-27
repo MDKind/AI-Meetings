@@ -79,22 +79,6 @@ class AudioSynchronizer:
             self.mic_buffer.extend(audio_data.flatten())
             self.mic_timestamp = time.time()
             
-    def add_system_data(self, audio_data):
-        """
-        Добавляет данные системного звука
-        
-        Args:
-            audio_data: numpy array с аудио данными
-        """
-        with self.system_lock:
-            # Если данные многоканальные, конвертируем в моно
-            if len(audio_data.shape) > 1 and audio_data.shape[1] > 1:
-                audio_data = np.mean(audio_data, axis=1)
-                
-            # Добавляем в буфер
-            self.system_buffer.extend(audio_data.flatten())
-            self.system_timestamp = time.time()
-            
     def get_synchronized_audio(self, timeout=0.1):
         """
         Получает синхронизированное аудио

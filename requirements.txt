@@ -1,28 +1,17 @@
-# Основные зависимости
+# AI Meetings — зависимости
+# Установка: pip install -r requirements.txt
+
+# Аудио-захват и обработка
 numpy>=1.20.0
-openai>=1.0.0
-pydub>=0.25.1
-
-# Для обработки аудио
-scipy>=1.8.0
 sounddevice>=0.4.6
-ffmpeg-python>=0.2.0
+pyaudio>=0.2.11        # Опциональный fallback для захвата системного аудио
 
-# Дополнительные библиотеки для захвата аудио
-pyaudio>=0.2.11
-comtypes>=1.1.10  # Для Windows WASAPI
-pycaw>=20220416  # Для управления Windows аудио
-
-# Для распознавания речи
+# Распознавание речи (STT)
 faster-whisper>=1.0.0  # 2-4x быстрее openai-whisper, не требует torch
 
-# VAD (Voice Activity Detection)
-# faster-whisper включает встроенный VAD на основе Silero.
+# LLM-клиент
+openai>=1.0.0          # SDK для OpenAI и OpenAI-совместимых API (LM Studio)
+requests>=2.28.0       # HTTP для LM Studio Runtime API (/api/v1)
 
-# Для пользовательского интерфейса
-# tkinter обычно уже установлен с Python
-
-# Дополнительные утилиты
+# Конфигурация
 python-dotenv>=1.0.0
-requests>=2.28.0  # Для HTTP запросов
-pillow>=9.0.0  # Для обработки изображений (если понадобится для UI)

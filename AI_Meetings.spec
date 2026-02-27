@@ -21,33 +21,30 @@ import sounddevice as _sd
 sd_dir = Path(_sd.__file__).parent
 sd_datas = [(str(sd_dir), 'sounddevice')]
 
-# ── Project files (data/ needed at runtime) ───────────────────────────────────
-project_datas = [
-    (str(project_root / 'data'), 'data'),
-]
-
-all_datas = ct2_datas + sd_datas + project_datas
+all_datas = ct2_datas + sd_datas
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
 hidden_imports = [
+    # faster-whisper / ctranslate2
     'faster_whisper', 'faster_whisper.audio', 'faster_whisper.tokenizer',
     'faster_whisper.transcribe', 'faster_whisper.utils', 'faster_whisper.vad',
     'ctranslate2',
     'tokenizers',
     'huggingface_hub', 'huggingface_hub.file_download',
     'av', 'av.audio',
+    'onnxruntime',
+    # Audio
     'sounddevice', 'pyaudio',
     'comtypes', 'comtypes.client',
-    'pycaw', 'pycaw.pycaw',
-    'scipy', 'scipy.signal',
-    'pydub', 'pydub.audio_segment',
+    # LLM / networking
     'openai', 'httpx', 'httpcore', 'anyio',
+    'requests',
+    'tiktoken', 'tiktoken_ext', 'tiktoken_ext.openai_public',
+    # UI / stdlib
     'tkinter', 'tkinter.ttk', 'tkinter.messagebox',
-    'dotenv', 'numpy', 'PIL', 'PIL.Image',
-    'requests', 'tiktoken',
-    'tiktoken_ext', 'tiktoken_ext.openai_public',
+    'dotenv', 'numpy',
+    # numba/llvmlite needed by some ctranslate2 builds
     'numba', 'llvmlite',
-    'onnxruntime',
 ]
 
 a = Analysis(
@@ -67,6 +64,8 @@ a = Analysis(
         'IPython', 'jupyter', 'notebook',
         'matplotlib', 'pandas', 'pyarrow',
         'grpc', 'tensorboard',
+        'pydub', 'scipy', 'PIL', 'pillow',
+        'pycaw',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

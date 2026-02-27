@@ -172,21 +172,6 @@ class SpeechRecognizer:
             traceback.print_exc()
             return ""
 
-    def transcribe_audio_file(self, file_path, language=None):
-        """
-        Распознает речь из аудиофайла.
-
-        Returns:
-            str: Распознанный текст
-        """
-        try:
-            with open(file_path, 'rb') as f:
-                audio_data = f.read()
-            return self.transcribe_audio_data(audio_data, language=language)
-        except Exception as e:
-            print(f"Ошибка при чтении файла {file_path}: {e}")
-            return ""
-
 
 # Тестовый код (выполняется только при запуске файла напрямую)
 if __name__ == "__main__":
