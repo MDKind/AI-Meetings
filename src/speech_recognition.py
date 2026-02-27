@@ -1,24 +1,207 @@
 import os
-import tempfile
-import numpy as np
-import wave
+import struct
 import subprocess
-import uuid
+import sys
+import tempfile
+import threading
 import traceback
-from faster_whisper import WhisperModel
+import wave
+import uuid
+import numpy as np
 from utils.config import SPEECH_RECOGNITION
 
 
-def _select_device():
+# ---------------------------------------------------------------------------
+# GGML model download helper
+# ---------------------------------------------------------------------------
+
+GGML_MODEL_URLS = {
+    'tiny':       'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin',
+    'base':       'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
+    'small':      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin',
+    'medium':     'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin',
+    'large':      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin',
+    'large-v3':   'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin',
+    'large-v3-turbo': 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin',
+    'turbo':      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin',
+}
+
+def _ggml_model_path(model_name: str) -> str:
+    """Возвращает путь к GGML модели, скачивая если нужно."""
+    models_dir = os.path.join(
+        os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
+        'AI Meetings', 'models'
+    )
+    os.makedirs(models_dir, exist_ok=True)
+
+    filename = f'ggml-{model_name}.bin'
+    path = os.path.join(models_dir, filename)
+
+    if os.path.exists(path):
+        return path
+
+    url = GGML_MODEL_URLS.get(model_name)
+    if not url:
+        raise ValueError(f"Неизвестная GGML модель: {model_name}. Доступны: {list(GGML_MODEL_URLS)}")
+
+    print(f"[WhisperNet] Скачивание модели {model_name} из {url} ...")
+    import urllib.request
+
+    def _progress(count, block_size, total_size):
+        if total_size > 0:
+            pct = count * block_size * 100 // total_size
+            print(f"\r[WhisperNet] Скачивание: {min(pct, 100)}%", end='', flush=True)
+
+    urllib.request.urlretrieve(url, path, reporthook=_progress)
+    print(f"\n[WhisperNet] Модель сохранена: {path}")
+    return path
+
+
+# ---------------------------------------------------------------------------
+# WhisperNet backend — .NET 8 whisper.net + Vulkan
+# ---------------------------------------------------------------------------
+
+class WhisperNetBackend:
     """
-    Выбирает устройство для инференса.
-    Возвращает (device, compute_type).
-    На Windows с AMD/без NVIDIA всегда возвращает cpu/int8.
+    Запускает WhisperService.exe как долгоживущий subprocess.
+    Общение по бинарному stdin/stdout протоколу:
+      Python→C#: int32(len) + bytes(wav)
+      C#→Python: int32(len) + bytes(text_utf8)
+                 int32(-1) + int32(err_len) + bytes(err_utf8)  — при ошибке
     """
+
+    def __init__(self, model_name: str, language: str):
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._ready_event = threading.Event()
+        self._ready_error: str | None = None
+
+        exe = self._find_service_exe()
+        if not exe:
+            raise RuntimeError("WhisperService.exe не найден")
+
+        model_path = _ggml_model_path(model_name)
+
+        print(f"[WhisperNet] Запуск сервиса: {exe}")
+        self._proc = subprocess.Popen(
+            [exe, model_path, language],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        # stderr читается в отдельном потоке; он же сигнализирует о готовности
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
+
+        # Ждём готовности (таймаут 60 сек — модель может долго грузиться)
+        if not self._ready_event.wait(timeout=60):
+            self._proc.kill()
+            raise RuntimeError("WhisperService не вышел в Ready за 60 секунд")
+        if self._ready_error:
+            raise RuntimeError(f"WhisperService ошибка старта: {self._ready_error}")
+
+    def _find_service_exe(self) -> str | None:
+        # Базовые директории поиска
+        dirs = []
+
+        # При PyInstaller: sys.executable — это AI_Meetings.exe, рядом лежит whisper_service/
+        dirs.append(os.path.dirname(sys.executable))
+
+        # При запуске из исходников: рядом с main.py (sys.argv[0])
+        dirs.append(os.path.dirname(os.path.abspath(sys.argv[0])))
+
+        # data/whisper_service/ в репозитории (dev режим)
+        dirs.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'whisper_service'))
+        # Сам exe в data/whisper_service/ (поднимаемся через data/)
+        dirs.append(os.path.dirname(os.path.dirname(__file__)))
+
+        candidates = [
+            os.path.join(d, 'whisper_service', 'WhisperService.exe') for d in dirs
+        ] + [
+            # data/whisper_service/WhisperService.exe (dev)
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'whisper_service', 'WhisperService.exe'),
+        ]
+
+        for p in candidates:
+            if os.path.exists(p):
+                print(f"[WhisperNet] Найден сервис: {p}")
+                return p
+        return None
+
+    def _read_stderr(self):
+        """Читает stderr в фоне, сигнализирует о готовности через _ready_event."""
+        assert self._proc and self._proc.stderr
+        try:
+            for line in self._proc.stderr:
+                msg = line.decode('utf-8', errors='replace').strip()
+                if msg:
+                    print(f"[WhisperNet] {msg}")
+                if 'Ready' in msg:
+                    self._ready_event.set()
+                elif 'Fatal' in msg or 'not found' in msg.lower():
+                    self._ready_error = msg
+                    self._ready_event.set()
+        except Exception:
+            pass
+        finally:
+            # Если процесс упал до Ready — разблокируем ожидание
+            if not self._ready_event.is_set():
+                self._ready_error = "WhisperService завершился неожиданно"
+                self._ready_event.set()
+
+    def transcribe(self, wav_bytes: bytes) -> str:
+        with self._lock:
+            if not self._proc or self._proc.poll() is not None:
+                raise RuntimeError("WhisperService не запущен")
+
+            assert self._proc.stdin and self._proc.stdout
+
+            # Отправляем: int32(len) + bytes
+            self._proc.stdin.write(struct.pack('<i', len(wav_bytes)))
+            self._proc.stdin.write(wav_bytes)
+            self._proc.stdin.flush()
+
+            # Читаем: int32(len)
+            raw_len = self._proc.stdout.read(4)
+            if len(raw_len) < 4:
+                raise RuntimeError("WhisperService закрыл stdout")
+
+            resp_len = struct.unpack('<i', raw_len)[0]
+
+            if resp_len == -1:
+                # Ошибка: читаем длину + текст ошибки
+                err_raw = self._proc.stdout.read(4)
+                err_len = struct.unpack('<i', err_raw)[0]
+                err_bytes = self._proc.stdout.read(err_len)
+                raise RuntimeError(f"WhisperService error: {err_bytes.decode('utf-8', errors='replace')}")
+
+            text_bytes = self._proc.stdout.read(resp_len)
+            return text_bytes.decode('utf-8', errors='replace')
+
+    def close(self):
+        if self._proc and self._proc.poll() is None:
+            try:
+                # Посылаем команду завершения: int32(0)
+                self._proc.stdin.write(struct.pack('<i', 0))
+                self._proc.stdin.flush()
+                self._proc.wait(timeout=5)
+            except Exception:
+                self._proc.kill()
+        self._proc = None
+
+    def __del__(self):
+        self.close()
+
+
+# ---------------------------------------------------------------------------
+# faster-whisper fallback backend
+# ---------------------------------------------------------------------------
+
+def _select_ct2_device():
     try:
         import ctranslate2
         ctranslate2.get_supported_compute_types("cuda")
-        # Если не упало — CUDA доступна
         print("CUDA доступна, используется GPU")
         return "cuda", "float16"
     except Exception:
@@ -27,123 +210,35 @@ def _select_device():
     return "cpu", "int8"
 
 
-class SpeechRecognizer:
-    """
-    Класс для распознавания речи с использованием faster-whisper.
-    faster-whisper работает в 2-4x быстрее openai-whisper на CPU,
-    не требует torch и поддерживает int8-квантизацию.
-    """
+class FasterWhisperBackend:
+    def __init__(self, model_name: str, language: str):
+        from faster_whisper import WhisperModel
+        device, compute_type = _select_ct2_device()
+        print(f"[FasterWhisper] Загрузка модели '{model_name}' (device={device}, compute={compute_type})...")
+        self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        self.language = language
+        print("[FasterWhisper] Модель загружена!")
 
-    # Если вероятность отсутствия речи выше этого порога — отбрасываем сегмент.
     NO_SPEECH_THRESHOLD = 0.6
 
-    def __init__(self, model_name=SPEECH_RECOGNITION['default_model']):
-        device, compute_type = _select_device()
-        self.device = device
-        self.model_name = model_name
-
-        print(f"Загрузка модели Whisper '{model_name}' (faster-whisper, device={device}, compute={compute_type})...")
-        self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
-        print("Модель загружена!")
-
-        # Создаем директорию для временных файлов
-        self.temp_dir = SPEECH_RECOGNITION['temp_dir']
-        self._ensure_temp_dir()
-
-        # Проверяем доступность ffmpeg при инициализации
-        self.ffmpeg_available = self._check_ffmpeg()
-
-    def _ensure_temp_dir(self):
-        try:
-            if not os.path.exists(self.temp_dir):
-                os.makedirs(self.temp_dir, exist_ok=True)
-                print(f"Создана директория для временных файлов: {self.temp_dir}")
-        except Exception as e:
-            print(f"Ошибка при создании директории {self.temp_dir}: {e}")
-            self.temp_dir = tempfile.gettempdir()
-            print(f"Используется системная временная директория: {self.temp_dir}")
-
-    def _check_ffmpeg(self):
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=5
-            )
-            if result.returncode == 0:
-                print("FFmpeg найден и доступен")
-                return True
-        except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
-            print(f"FFmpeg не доступен: {e}")
-        return False
-
-    def transcribe_audio_data(self, audio_data, sample_rate=16000, language=SPEECH_RECOGNITION['default_language']):
-        """
-        Распознает речь из аудиоданных в памяти (bytes или list of bytes).
-
-        Returns:
-            str: Распознанный текст
-        """
+    def transcribe(self, wav_bytes: bytes) -> str:
         temp_path = None
         try:
-            if isinstance(audio_data, list):
-                audio_data = b''.join(audio_data)
-
-            if not audio_data or len(audio_data) == 0:
-                print("Нет данных для распознавания")
-                return ""
-
-            temp_filename = f"whisper_{str(uuid.uuid4())}.wav"
-            temp_path = os.path.join(self.temp_dir, temp_filename)
-
-            print(f"Сохранение временного файла: {temp_path}")
+            temp_path = os.path.join(
+                SPEECH_RECOGNITION['temp_dir'],
+                f"whisper_{uuid.uuid4()}.wav"
+            )
             with wave.open(temp_path, 'wb') as wf:
                 wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(sample_rate)
-                wf.writeframes(audio_data)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(wav_bytes)
 
-            if not os.path.exists(temp_path):
-                print(f"ОШИБКА: Временный файл не был создан: {temp_path}")
-                return ""
-
-            file_size = os.path.getsize(temp_path)
-            if file_size == 0:
-                print(f"ПРЕДУПРЕЖДЕНИЕ: Временный файл пустой: {temp_path}")
-                return ""
-
-            print(f"Временный файл создан: {temp_path}, размер: {file_size} байт")
-            return self._transcribe_with_whisper(temp_path, language)
-
-        except Exception as e:
-            print(f"Ошибка при распознавании речи: {e}")
-            traceback.print_exc()
-            return ""
-        finally:
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                    print(f"Временный файл удален: {temp_path}")
-                except Exception as e:
-                    print(f"Не удалось удалить временный файл {temp_path}: {e}")
-
-    def _transcribe_with_whisper(self, audio_path, language=None):
-        """
-        Выполняет распознавание через faster-whisper.
-        Фильтрует сегменты с высокой вероятностью отсутствия речи.
-
-        Returns:
-            str: Распознанный текст или "" если речь не обнаружена
-        """
-        try:
             kwargs = {"beam_size": 5}
-            if language:
-                kwargs["language"] = language
+            if self.language:
+                kwargs["language"] = self.language
 
-            segments_gen, info = self.model.transcribe(audio_path, **kwargs)
-
-            # Собираем сегменты и считаем взвешенный no_speech_prob
+            segments_gen, _ = self.model.transcribe(temp_path, **kwargs)
             segments = list(segments_gen)
 
             if not segments:
@@ -152,50 +247,109 @@ class SpeechRecognizer:
             total_dur = sum(max(s.end - s.start, 0) for s in segments)
             if total_dur > 0:
                 weighted_no_speech = sum(
-                    s.no_speech_prob * max(s.end - s.start, 0)
-                    for s in segments
+                    s.no_speech_prob * max(s.end - s.start, 0) for s in segments
                 ) / total_dur
             else:
                 weighted_no_speech = segments[0].no_speech_prob
 
             if weighted_no_speech > self.NO_SPEECH_THRESHOLD:
-                print(f"Сегмент отброшен (no_speech_prob={weighted_no_speech:.2f})")
+                print(f"[FasterWhisper] Сегмент отброшен (no_speech_prob={weighted_no_speech:.2f})")
                 return ""
 
-            text = " ".join(s.text for s in segments).strip()
+            return " ".join(s.text for s in segments).strip()
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+    def close(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# SpeechRecognizer — публичный API
+# ---------------------------------------------------------------------------
+
+class SpeechRecognizer:
+    """
+    Распознавание речи.
+    Использует WhisperNet (whisper.net + Vulkan) если доступен,
+    иначе падает на faster-whisper (CPU).
+    """
+
+    NO_SPEECH_THRESHOLD = 0.6
+
+    def __init__(self, model_name=SPEECH_RECOGNITION['default_model']):
+        self.model_name = model_name
+        language = SPEECH_RECOGNITION['default_language']
+
+        self._backend = None
+        self._ensure_temp_dir()
+
+        # Пробуем WhisperNet (GPU)
+        try:
+            self._backend = WhisperNetBackend(model_name, language)
+            print("[SpeechRecognizer] Backend: WhisperNet (Vulkan GPU)")
+        except Exception as e:
+            print(f"[SpeechRecognizer] WhisperNet недоступен: {e} — fallback на faster-whisper")
+            self._backend = FasterWhisperBackend(model_name, language)
+            print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
+
+    def _ensure_temp_dir(self):
+        temp_dir = SPEECH_RECOGNITION['temp_dir']
+        try:
+            os.makedirs(temp_dir, exist_ok=True)
+        except Exception as e:
+            print(f"[SpeechRecognizer] Не удалось создать temp-dir: {e}")
+
+    def transcribe_audio_data(self, audio_data, sample_rate=16000,
+                              language=SPEECH_RECOGNITION['default_language']) -> str:
+        """
+        Распознаёт речь из raw PCM bytes (16-bit, mono).
+        """
+        try:
+            if isinstance(audio_data, list):
+                audio_data = b''.join(audio_data)
+
+            if not audio_data:
+                return ""
+
+            # Фильтруем тишину по RMS (аналог no_speech_prob для WhisperNet)
+            samples = np.frombuffer(audio_data, dtype=np.int16)
+            rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+            if rms < 50:
+                return ""
+
+            # Упаковываем в WAV в памяти
+            wav_buf = self._to_wav_bytes(audio_data, sample_rate)
+            text = self._backend.transcribe(wav_buf)
+
             if text:
-                print(f"Распознано: {text[:80]}{'...' if len(text) > 80 else ''}")
+                print(f"[SpeechRecognizer] Распознано: {text[:80]}{'...' if len(text) > 80 else ''}")
             return text
 
         except Exception as e:
-            print(f"Ошибка при распознавании с Whisper: {e}")
+            print(f"[SpeechRecognizer] Ошибка: {e}")
             traceback.print_exc()
             return ""
 
-
-# Тестовый код (выполняется только при запуске файла напрямую)
-if __name__ == "__main__":
-    test_audio = "test_audio.wav"
-    if not os.path.exists(test_audio):
-        print("Создаем тестовый аудиофайл...")
-        sample_rate = 16000
-        duration = 3
-        frequency = 440
-        t = np.linspace(0, duration, int(sample_rate * duration), False)
-        tone = np.sin(2 * np.pi * frequency * t)
-        tone = (tone * 32767).astype(np.int16)
-        with wave.open(test_audio, 'wb') as wf:
+    @staticmethod
+    def _to_wav_bytes(pcm_bytes: bytes, sample_rate: int) -> bytes:
+        import io
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(sample_rate)
-            wf.writeframes(tone.tobytes())
-        print(f"Тестовый аудиофайл создан: {test_audio}")
+            wf.writeframes(pcm_bytes)
+        return buf.getvalue()
 
-    recognizer = SpeechRecognizer(model_name="tiny")
-    print(f"\nРаспознавание текста из файла {test_audio}...")
-    transcription = recognizer.transcribe_audio_file(test_audio)
-    print(f"Распознанный текст: {transcription}")
+    def close(self):
+        if self._backend:
+            self._backend.close()
+            self._backend = None
 
-    if os.path.exists(test_audio):
-        os.remove(test_audio)
-        print(f"\nТестовый файл удален: {test_audio}")
+    def __del__(self):
+        self.close()

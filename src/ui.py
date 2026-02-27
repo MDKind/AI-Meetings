@@ -157,29 +157,13 @@ class AudioAssistantUI:
         ttk.Button(buttons_frame, text="Очистить историю",
                   command=self.clear_history, width=15).pack(side="left", padx=5)
         
-        # Создаем разделенное окно для одновременного отображения распознанного текста и ответов ChatGPT
-        content_frame = ttk.Frame(main_frame)
-        content_frame.pack(fill="both", expand=True, pady=5)
-        
-        # Создаем вертикальный разделитель панелей (верхняя и нижняя части)
-        paned_window = ttk.PanedWindow(content_frame, orient=tk.VERTICAL)
-        paned_window.pack(fill="both", expand=True)
-        
-        # Панель для распознанного текста (верхняя часть)
-        text_frame = ttk.LabelFrame(paned_window, text="Распознанный текст", padding=5)
-        paned_window.add(text_frame, weight=1)
-        
-        self.transcription_text = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD, 
-                                                          font=default_font, height=8)
+        # Панель для распознанного текста
+        text_frame = ttk.LabelFrame(main_frame, text="Распознанный текст", padding=5)
+        text_frame.pack(fill="both", expand=True, pady=5)
+
+        self.transcription_text = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD,
+                                                          font=default_font, height=12)
         self.transcription_text.pack(fill="both", expand=True)
-        
-        # Панель для ответов ChatGPT (нижняя часть)
-        chat_frame = ttk.LabelFrame(paned_window, text="Ответы ChatGPT", padding=5)
-        paned_window.add(chat_frame, weight=1)
-        
-        self.chat_text = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, 
-                                                 font=default_font, height=8)
-        self.chat_text.pack(fill="both", expand=True)
         
         # Создаем вкладки для саммари и настроек
         notebook = ttk.Notebook(main_frame)
@@ -266,6 +250,8 @@ class AudioAssistantUI:
             # Обновляем параметры существующего клиента (не пересоздаём — история сохраняется)
             self.chatgpt_client.base_url = base_url
             self.chatgpt_client._lmstudio_runtime = _is_lmstudio_runtime(base_url)
+            # Применяем модель только если она явно задана (не пустая)
+            # Если пустая — дождёмся _fetch_models и она выставится оттуда
             if model:
                 self.chatgpt_client.model = model
 
@@ -308,14 +294,18 @@ class AudioAssistantUI:
             if resp.status_code == 200:
                 data = resp.json()
                 print(f"Models response keys: {list(data.keys())}")
-                # OpenAI/LM Studio: {"data": [{"id": "..."}]}
+                # OpenAI-совместимый: {"data": [{"id": "..."}]}
                 model_ids = [m['id'] for m in data.get('data', []) if 'id' in m]
-                # LM Studio Runtime может вернуть {"models": [...]} или просто список
+                # LM Studio Runtime API: {"models": [{"key": "...", "type": "llm"}]}
                 if not model_ids and 'models' in data:
-                    model_ids = [m.get('id') or m.get('name') for m in data['models'] if isinstance(m, dict)]
+                    model_ids = [
+                        m.get('key') or m.get('id') or m.get('name')
+                        for m in data['models']
+                        if isinstance(m, dict) and m.get('type', 'llm') == 'llm'
+                    ]
                     model_ids = [m for m in model_ids if m]
                 if not model_ids and isinstance(data, list):
-                    model_ids = [m.get('id') or m.get('name') for m in data if isinstance(m, dict)]
+                    model_ids = [m.get('id') or m.get('key') or m.get('name') for m in data if isinstance(m, dict)]
                     model_ids = [m for m in model_ids if m]
                 model_ids = sorted(model_ids)
                 print(f"Found models: {model_ids}")
@@ -328,12 +318,12 @@ class AudioAssistantUI:
         """Обновляет комбобокс моделей в главном потоке."""
         current = self.chatgpt_model_combobox.get()
         self.chatgpt_model_combobox['values'] = model_ids
-        if current not in model_ids:
-            self.chatgpt_model_combobox.set(model_ids[0])
-            if self.chatgpt_client:
-                self.chatgpt_client.model = model_ids[0]
-            # Сохраняем обновлённую модель
-            self._save_env(api_key=None, api_base=self.chatgpt_client.base_url or '', model=model_ids[0])
+        # Выбираем текущую если она есть в списке, иначе первую
+        selected = current if current in model_ids else model_ids[0]
+        self.chatgpt_model_combobox.set(selected)
+        if self.chatgpt_client:
+            self.chatgpt_client.model = selected
+        self._save_env(api_key=None, api_base=(self.chatgpt_client.base_url or '') if self.chatgpt_client else '', model=selected)
 
     def refresh_devices(self):
         """
@@ -583,23 +573,6 @@ class AudioAssistantUI:
         self.transcription_text.see(tk.END)
         self.transcription_text.configure(state="disabled")
     
-    def update_chat(self, text):
-        """
-        Обновляет текст в поле ответов ChatGPT
-        
-        Args:
-            text (str): Текст ответа
-        """
-        # Добавляем временную метку
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        formatted_text = f"[{timestamp}] {text}\n\n"
-        
-        # Вставляем текст в конец
-        self.chat_text.configure(state="normal")
-        self.chat_text.insert(tk.END, formatted_text)
-        self.chat_text.see(tk.END)
-        self.chat_text.configure(state="disabled")
-    
     def generate_summary(self):
         """
         Генерирует и отображает саммари встречи по накопленным транскрипциям.
@@ -671,10 +644,6 @@ class AudioAssistantUI:
         self.transcription_text.configure(state="normal")
         self.transcription_text.delete(1.0, tk.END)
         self.transcription_text.configure(state="disabled")
-        
-        self.chat_text.configure(state="normal")
-        self.chat_text.delete(1.0, tk.END)
-        self.chat_text.configure(state="disabled")
         
         self.summary_text.configure(state="normal")
         self.summary_text.delete(1.0, tk.END)

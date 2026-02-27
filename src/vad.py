@@ -10,14 +10,16 @@ Silero VAD: https://github.com/snakers4/silero-vad
 - Не требует настройки порогов
 """
 
+import copy
 import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Пытаемся загрузить Silero VAD
+# Загрузка Silero VAD — один раз, потом копируем для каждого инстанса
 _silero_model = None
 _silero_available = False
+
 
 def _try_load_silero():
     """Ленивая загрузка Silero VAD при первом обращении."""
@@ -46,25 +48,33 @@ class SileroVAD:
     """
     Нейросетевой детектор речи на основе Silero VAD.
     Принимает чанки float32 16 kHz моно.
+
+    Каждый инстанс держит собственную копию модели — полная изоляция
+    LSTM-состояния между потоками без локов.
     """
 
     # Silero VAD ожидает чанки строго 512 или 256 сэмплов при 16 kHz
     CHUNK_SAMPLES = 512
 
     def __init__(self, threshold: float = 0.5, sample_rate: int = 16000):
-        """
-        Args:
-            threshold: Порог вероятности речи [0..1]. 0.5 — сбалансированный.
-                       Понизить до 0.3 для тихих голосов, повысить до 0.7 для шумных помещений.
-            sample_rate: Частота дискретизации (только 16000 или 8000).
-        """
         self.threshold = threshold
         self.sample_rate = sample_rate
-        self._available = _try_load_silero()
         self._remainder = np.array([], dtype=np.float32)
 
+        self._available = _try_load_silero()
+        # Каждый инстанс получает независимую копию модели (свой LSTM state)
+        if self._available and _silero_model is not None:
+            try:
+                self._model = copy.deepcopy(_silero_model)
+                self._model.eval()
+            except Exception as e:
+                logger.warning(f"Silero deepcopy не удался, используется общая модель: {e}")
+                self._model = _silero_model
+        else:
+            self._model = None
+
     def is_available(self) -> bool:
-        return self._available
+        return self._available and self._model is not None
 
     def is_speech(self, audio_chunk: np.ndarray) -> bool:
         """
@@ -76,29 +86,26 @@ class SileroVAD:
         Returns:
             True если речь обнаружена.
         """
-        if not self._available or _silero_model is None:
+        if not self.is_available():
             return _rms_is_speech(audio_chunk)
 
         try:
             import torch
 
-            # Добавляем остаток от предыдущего вызова
             audio = np.concatenate([self._remainder, audio_chunk.flatten()])
 
-            # Обрабатываем кратными CHUNK_SAMPLES блоками
             speech_detected = False
             pos = 0
+            # Нет глобального лока — у каждого инстанса своя модель и свой LSTM state
             while pos + self.CHUNK_SAMPLES <= len(audio):
                 chunk = audio[pos: pos + self.CHUNK_SAMPLES]
                 tensor = torch.from_numpy(chunk).unsqueeze(0)  # (1, 512)
-                prob = _silero_model(tensor, self.sample_rate).item()
+                prob = self._model(tensor, self.sample_rate).item()
                 if prob >= self.threshold:
                     speech_detected = True
                 pos += self.CHUNK_SAMPLES
 
-            # Сохраняем остаток для следующего вызова
             self._remainder = audio[pos:]
-
             return speech_detected
 
         except Exception as e:
@@ -106,11 +113,11 @@ class SileroVAD:
             return _rms_is_speech(audio_chunk)
 
     def reset(self):
-        """Сбрасывает внутренний буфер (вызывать при старте новой записи)."""
+        """Сбрасывает внутренний буфер и LSTM-состояние."""
         self._remainder = np.array([], dtype=np.float32)
-        if self._available and _silero_model is not None:
+        if self._model is not None:
             try:
-                _silero_model.reset_states()
+                self._model.reset_states()
             except Exception:
                 pass
 
@@ -122,11 +129,6 @@ class RmsVAD:
     """
 
     def __init__(self, threshold: int = 300):
-        """
-        Args:
-            threshold: Порог RMS в единицах int16 (0..32767).
-                       300 ≈ 0.9% от максимума — подходит для тихих помещений.
-        """
         self.threshold = threshold
 
     def is_speech(self, audio_chunk: np.ndarray) -> bool:
@@ -141,7 +143,6 @@ def _rms_is_speech(audio_chunk: np.ndarray, threshold: int = 300) -> bool:
     if audio_chunk is None or len(audio_chunk) == 0:
         return False
     flat = audio_chunk.flatten()
-    # Если float32 [-1..1] — масштабируем до int16 диапазона для сравнения
     if flat.dtype in (np.float32, np.float64):
         flat = (flat * 32767).astype(np.int16)
     return float(np.abs(flat).mean()) > threshold
@@ -151,14 +152,6 @@ def create_vad(threshold: float = 0.5, rms_threshold: int = 300,
                sample_rate: int = 16000) -> 'SileroVAD | RmsVAD':
     """
     Фабричная функция: возвращает Silero VAD если доступен, иначе RMS VAD.
-
-    Args:
-        threshold: Порог для Silero VAD (0..1)
-        rms_threshold: Порог для RMS VAD (int16 единицы)
-        sample_rate: Частота дискретизации
-
-    Returns:
-        SileroVAD или RmsVAD
     """
     vad = SileroVAD(threshold=threshold, sample_rate=sample_rate)
     if vad.is_available():

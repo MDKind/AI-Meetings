@@ -4,7 +4,8 @@
 # Аудио-захват и обработка
 numpy>=1.20.0
 sounddevice>=0.4.6
-pyaudio>=0.2.11        # Опциональный fallback для захвата системного аудио
+pyaudiowpatch>=0.2.12  # WASAPI loopback захват системного звука (Windows)
+pyaudio>=0.2.11        # Опциональный fallback
 
 # Распознавание речи (STT)
 faster-whisper>=1.0.0  # 2-4x быстрее openai-whisper, не требует torch

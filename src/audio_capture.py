@@ -32,6 +32,7 @@ class AudioCapture:
         self.channels = channels
         self.rate = rate
         self.frames_queue = Queue()
+        self._mic_raw_queue = Queue()  # сырые чанки с микрофона (float32 int16)
         self.is_recording = False
         self.silence_threshold = silence_threshold
         # 0.7 сек тишины достаточно для сегментации диалога (было 2.0 — слишком много)
@@ -48,7 +49,15 @@ class AudioCapture:
 
         # VAD: Silero если доступен, иначе RMS
         self._vad = create_vad(threshold=0.5, rms_threshold=silence_threshold, sample_rate=rate)
+        self._vad_lock = threading.Lock()
         print(f"VAD инициализирован: {type(self._vad).__name__}")
+
+        # Отдельный VAD + состояние для системного звука (изолировано от mic-пути)
+        self._sys_vad = create_vad(threshold=0.5, rms_threshold=silence_threshold, sample_rate=rate)
+        self._sys_frames: list[bytes] = []
+        self._sys_speaking = False
+        self._sys_silent_chunks = 0
+        self._sys_segment_start: datetime | None = None
         
         # Инициализируем синхронизатор и процессор
         self.audio_sync = AudioSynchronizer(
@@ -122,7 +131,8 @@ class AudioCapture:
 
         # Конвертируем в float32 для VAD
         audio_f32 = audio_data.astype(np.float32) / 32767.0
-        is_speech = self._vad.is_speech(audio_f32)
+        with self._vad_lock:
+            is_speech = self._vad.is_speech(audio_f32)
 
         if is_speech:
             self.silent_chunks = 0
@@ -259,52 +269,54 @@ class AudioCapture:
         self.current_frames = []
         self.silent_chunks = 0
         self.speaking = False
+        self._segment_start_time = None
         self.streams = []
-        
-        # Включаем синхронизатор
-        self.use_synchronizer = True
-        self.audio_sync.reset_buffers()
-        self.audio_sync.start()
-        
+        self.use_synchronizer = False  # Синхронизатор не используется
+
+        # Сбрасываем состояние системного аудио
+        self._sys_frames = []
+        self._sys_speaking = False
+        self._sys_silent_chunks = 0
+        self._sys_segment_start = None
+        if hasattr(self._sys_vad, 'reset'):
+            self._sys_vad.reset()
+        if hasattr(self._vad, 'reset'):
+            self._vad.reset()
+
         try:
-            # 1. Запускаем запись с микрофона
+            # 1. Микрофон — напрямую через _process_audio_data (speaker="local")
             mic_stream = sd.InputStream(
                 samplerate=self.rate,
                 channels=self.channels,
                 device=input_device_index,
                 blocksize=self.chunk_size,
                 dtype='float32',
-                callback=self._enhanced_mic_callback  # Используем улучшенный callback
+                callback=self._mic_callback,
             )
-            
             self.streams.append(mic_stream)
             mic_stream.start()
             print(f"Запись с микрофона (индекс {input_device_index}) началась")
-            
-            # 2. Захват системного звука через SystemAudioCapture
-            if True:
-                # Используем универсальный метод захвата
-                self.system_capture = SystemAudioCapture(
-                    sample_rate=self.rate,
-                    channels=self.channels,
-                    chunk_size=self.chunk_size
-                )
-                
-                threading.Thread(
-                    target=self._capture_system_audio,
-                    args=(output_device_index,),
-                    daemon=True
-                ).start()
-                
-                print("Используется альтернативный метод захвата системного звука")
-            
-            print("Улучшенная запись звука запущена")
-            
-            # Запускаем поток для обработки синхронизированного аудио
+
+            # 2. Системный звук — через SystemAudioCapture в отдельном потоке
+            self.system_capture = SystemAudioCapture(
+                sample_rate=self.rate,
+                channels=self.channels,
+                chunk_size=self.chunk_size,
+            )
             threading.Thread(
-                target=self._process_synchronized_audio,
-                daemon=True
+                target=self._capture_system_audio,
+                args=(output_device_index,),
+                daemon=True,
             ).start()
+            print("Захват системного звука запущен")
+
+            # Поток обработки mic (VAD + сегментация вне PortAudio callback)
+            threading.Thread(
+                target=self._mic_processing_thread,
+                daemon=True,
+            ).start()
+
+            print("Запись звука запущена")
             
         except Exception as e:
             self.is_recording = False
@@ -321,28 +333,20 @@ class AudioCapture:
             print(f"Ошибка при запуске записи: {e}")
             raise
     
-    def _enhanced_mic_callback(self, indata, frames, time, status):
-        """
-        Callback для микрофона в улучшенном режиме
-        
-        Args:
-            indata: Входящие аудиоданные
-            frames: Количество фреймов
-            time: Информация о времени
-            status: Статус аудиопотока
-        """
+    def _mic_callback(self, indata, frames, time_info, status):
+        """Callback sounddevice для микрофона — только кладёт данные в очередь."""
         if status:
             print(f"Статус микрофона: {status}")
-        
-        # Конвертируем в float32 для синхронизатора
-        audio_data = indata.copy()
-        
-        # Если синхронизатор активен, отправляем данные туда
-        if self.use_synchronizer:
-            self.audio_sync.add_mic_data(audio_data)
-        
-        # Также обрабатываем стандартным способом для детекции речи
-        self._process_audio_data((audio_data * 32767).astype(np.int16))
+        self._mic_raw_queue.put((indata.copy() * 32767).astype(np.int16))
+
+    def _mic_processing_thread(self):
+        """Обрабатывает сырые mic-чанки в отдельном потоке (VAD, сегментация)."""
+        while self.is_recording:
+            try:
+                chunk = self._mic_raw_queue.get(timeout=0.2)
+                self._process_audio_data(chunk, speaker="local")
+            except Exception:
+                pass
     
     def _process_synchronized_audio(self):
         """
@@ -394,34 +398,86 @@ class AudioCapture:
         
         print("Поток обработки синхронизированного аудио завершен")
 
+    def _process_system_chunk(self, chunk_i16_1d: np.ndarray):
+        """
+        Обрабатывает один chunk_size системного звука через изолированный VAD+сегментатор.
+        Вызывается только из _capture_system_audio (один поток — нет race).
+        """
+        data = chunk_i16_1d.tobytes()
+        audio_f32 = chunk_i16_1d.astype(np.float32) / 32767.0
+        is_speech = self._sys_vad.is_speech(audio_f32)
+
+        max_chunks = int(self.rate / self.chunk_size * self.max_segment_duration)
+        silence_chunks_threshold = int(self.rate / self.chunk_size * self.silence_duration)
+
+        if is_speech:
+            self._sys_silent_chunks = 0
+            if not self._sys_speaking:
+                self._sys_speaking = True
+                self._sys_segment_start = datetime.now()
+            self._sys_frames.append(data)
+            if len(self._sys_frames) >= max_chunks:
+                self._flush_sys_segment()
+        else:
+            self._sys_silent_chunks += 1
+            if self._sys_speaking and self._sys_silent_chunks > silence_chunks_threshold:
+                self._flush_sys_segment()
+            elif self._sys_speaking:
+                self._sys_frames.append(data)
+
+    def _flush_sys_segment(self):
+        if not self._sys_frames:
+            return
+        self.frames_queue.put({
+            "frames": self._sys_frames.copy(),
+            "speaker": "remote",
+            "start_time": self._sys_segment_start or datetime.now(),
+            "end_time": datetime.now(),
+        })
+        print(f"Сегмент в очереди: speaker=remote, чанков={len(self._sys_frames)}")
+        self._sys_frames = []
+        self._sys_speaking = False
+        self._sys_silent_chunks = 0
+        self._sys_segment_start = None
+
     def _capture_system_audio(self, device_index):
         """
-        Функция для захвата системного звука в отдельном потоке
-        
-        Args:
-            device_index: Индекс устройства вывода
+        Функция для захвата системного звука в отдельном потоке.
+        Использует изолированный VAD и сегментатор (нет race с mic-потоком).
         """
         try:
-            # Запускаем захват системного звука
             self.system_capture.start_recording(device_index)
-            
-            # Регулярно получаем данные и обрабатываем их
+
             while self.is_recording:
-                # Подождем немного, чтобы накопились данные
-                time.sleep(0.5)
-                
-                # Получаем данные
+                time.sleep(0.1)
+
                 audio_data = self.system_capture.get_audio_data()
-                
-                if audio_data is not None:
-                    int_data = (audio_data * 32767).astype(np.int16)
-                    self._process_audio_data(int_data, speaker="remote")
-            
-            # Останавливаем захват
+                if audio_data is None:
+                    continue
+
+                # audio_data: float32, shape (N,) или (N, 1) — нормализуем
+                samples = audio_data.flatten()
+
+                # Конвертируем в int16 для совместимости с остальным пайплайном
+                int_samples = (samples * 32767).astype(np.int16)
+
+                # Разбиваем на chunk_size кусочки для корректной работы VAD
+                for i in range(0, len(int_samples), self.chunk_size):
+                    chunk = int_samples[i: i + self.chunk_size]
+                    if len(chunk) < self.chunk_size // 2:
+                        # Слишком маленький остаток — пропускаем
+                        break
+                    # Дополняем до chunk_size нулями если нужно
+                    if len(chunk) < self.chunk_size:
+                        chunk = np.pad(chunk, (0, self.chunk_size - len(chunk)))
+                    self._process_system_chunk(chunk)
+
             self.system_capture.stop_recording()
-            
+
         except Exception as e:
-            print(f"Ошибка при захвате системного звука: {e}")
+            import traceback
+            print(f"[ERROR] Ошибка при захвате системного звука: {e}")
+            traceback.print_exc()
     
     def close(self):
         """

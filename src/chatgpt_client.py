@@ -108,9 +108,27 @@ class ChatGPTClient:
         resp.raise_for_status()
         data = resp.json()
 
-        # LM Studio Runtime возвращает {"response": "...", "model": "...", ...}
+        # LM Studio Runtime: output может быть строкой или списком блоков
+        # [{'type': 'reasoning', 'content': '...'}, {'type': 'message', 'content': '...'}]
+        if 'output' in data:
+            output = data['output']
+            if isinstance(output, list):
+                # Берём только блоки type=message, игнорируем reasoning
+                text = ' '.join(
+                    b['content'] for b in output
+                    if isinstance(b, dict) and b.get('type') == 'message' and b.get('content')
+                )
+                if not text:
+                    # Fallback: берём любой content
+                    text = ' '.join(
+                        b['content'] for b in output
+                        if isinstance(b, dict) and b.get('content')
+                    )
+            else:
+                text = str(output)
+            return text.replace('\\n', '\n').strip()
         if 'response' in data:
-            return data['response']
+            return str(data['response']).replace('\\n', '\n').strip()
         if 'choices' in data and data['choices']:
             return data['choices'][0].get('message', {}).get('content', '') or ''
         if 'content' in data:

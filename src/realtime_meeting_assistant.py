@@ -159,6 +159,13 @@ class RealtimeMeetingAssistant:
                 thread.join(timeout=2.0)
         
         self.threads = []
+
+        # Закрываем бэкенд распознавания речи (освобождает WhisperService процесс)
+        try:
+            self.speech_recognizer.close()
+        except Exception as e:
+            print(f"Ошибка при закрытии speech_recognizer: {e}")
+
         print("Ассистент остановлен")
     
     def generate_meeting_summary(self, title=None):
@@ -203,7 +210,6 @@ class RealtimeMeetingAssistant:
                     speaker = "local"
 
                 # Распознаем текст
-                print("Распознавание речи...")
                 text = self.speech_recognizer.transcribe_audio_data(
                     segment,
                     sample_rate=AUDIO_SETTINGS['rate'],

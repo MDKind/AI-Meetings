@@ -66,6 +66,15 @@ dist/*.exe
 # install_deps.log генерируется на машине пользователя
 install_deps.log
 
+# WhisperService: бинари публикуются в data/whisper_service, не в git
+data/whisper_service/
+# Кроме этого разрешаем .gitkeep для папки
+!data/whisper_service/.gitkeep
+
+# .NET build артефакты
+whisper_service/bin/
+whisper_service/obj/
+
 # Кэш и временные файлы
 __pycache__/
 */__pycache__/

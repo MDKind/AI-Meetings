@@ -47,6 +47,10 @@ Source: "..\dist\AI_Meetings.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bundled\ffmpeg\ffmpeg.exe";  DestDir: "{app}"; Flags: ignoreversion
 Source: "bundled\ffmpeg\ffprobe.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; WhisperService — .NET 8 whisper.net + Vulkan GPU backend
+Source: "..\data\whisper_service\WhisperService.exe"; DestDir: "{app}\whisper_service"; Flags: ignoreversion
+Source: "..\data\whisper_service\runtimes\vulkan\win-x64\*"; DestDir: "{app}\whisper_service\runtimes\vulkan\win-x64"; Flags: ignoreversion recursesubdirs
+
 ; App icon (for shortcuts)
 Source: "assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
