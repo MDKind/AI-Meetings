@@ -247,7 +247,6 @@ class FletAudioAssistantUI:
             if model:
                 lines = set_var(lines, 'CHATGPT_MODEL', model)
 
-            import os
             os.makedirs(os.path.dirname(self.env_path), exist_ok=True)
             with open(self.env_path, 'w', encoding='utf-8') as f:
                 f.writelines(lines)

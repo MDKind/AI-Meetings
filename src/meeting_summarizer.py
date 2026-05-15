@@ -1,6 +1,4 @@
-import json
 from datetime import datetime
-from utils.config import CHATGPT_SETTINGS
 
 
 class MeetingSummarizer:
