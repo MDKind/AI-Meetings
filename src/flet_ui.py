@@ -138,30 +138,40 @@ class FletAudioAssistantUI:
                 
                 transcription = self.speech_recognizer.transcribe_audio_data(frames, language=lang)
                 if transcription:
+                    polished = False
                     if self.postprocess_enabled and self.chatgpt_client:
                         try:
-                            transcription = self.chatgpt_client.polish_transcription(transcription)
+                            improved = self.chatgpt_client.polish_transcription(transcription)
+                            if improved and improved.strip() != transcription.strip():
+                                transcription = improved
+                                polished = True
                         except Exception:
                             pass
-                    self.append_transcription(transcription, speaker)
+                    self.append_transcription(transcription, speaker, polished=polished)
             time.sleep(0.1)
 
-    def append_transcription(self, text, speaker):
+    def append_transcription(self, text, speaker, polished=False):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         is_local = speaker == "local"
         speaker_name = "Я" if is_local else "Собеседник"
         color = ft.colors.BLUE_400 if is_local else ft.colors.GREEN_400
 
         self.transcription_buffer.append({"text": text, "speaker": speaker_name})
-        
+
         if self.chatgpt_client:
             self.chatgpt_client.add_message(f"[{speaker_name}]: {text}", role="user")
 
+        header_row = ft.Row([
+            ft.Text(f"{speaker_name} • {ts}", color=color, size=12, weight=ft.FontWeight.BOLD),
+            *(
+                [ft.Icon(ft.icons.AUTO_AWESOME, size=12, color=ft.colors.AMBER_400,
+                         tooltip="Улучшено LLM")]
+                if polished else []
+            ),
+        ], spacing=4)
+
         msg = ft.Container(
-            content=ft.Column([
-                ft.Text(f"{speaker_name} • {ts}", color=color, size=12, weight=ft.FontWeight.BOLD),
-                ft.Text(text, size=14)
-            ], spacing=2),
+            content=ft.Column([header_row, ft.Text(text, size=14)], spacing=2),
             bgcolor=ft.colors.SURFACE_VARIANT,
             padding=10,
             border_radius=8,
@@ -347,9 +357,9 @@ class FletAudioAssistantUI:
             expand=True,
         )
         self.sw_postprocess = ft.Switch(
-            label="LLM-полировка транскрипта",
+            label="LLM-улучшение качества",
             value=False,
-            tooltip="Исправлять пунктуацию каждого фрагмента через LLM (добавляет задержку)",
+            tooltip="Улучшать каждый фрагмент транскрипта через LLM: исправляет ошибки распознавания, пунктуацию, делает текст связным. Добавляет задержку на каждый фрагмент.",
         )
 
         self.settings_dlg = ft.AlertDialog(
@@ -417,6 +427,7 @@ class FletAudioAssistantUI:
             width=280,
             padding=20,
             bgcolor=ft.colors.SURFACE,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
             content=ft.Column([
                 ft.Text("Устройства", weight=ft.FontWeight.BOLD),
                 self.dd_input,
