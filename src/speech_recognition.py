@@ -411,6 +411,29 @@ class SpeechRecognizer:
             self._backend = FasterWhisperBackend(model_name, language)
             print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
 
+    def set_model(self, model_name: str):
+        """Меняет модель Whisper. Перезапускает backend с новой моделью."""
+        if model_name == self.model_name:
+            return
+        print(f"[SpeechRecognizer] Смена модели: '{self.model_name}' → '{model_name}'")
+        language = ''
+        if self._backend:
+            if hasattr(self._backend, '_language'):
+                language = self._backend._language
+            elif hasattr(self._backend, 'language'):
+                language = self._backend.language
+        self.close()
+        self.model_name = model_name
+        self._ensure_temp_dir()
+        lang = language or SPEECH_RECOGNITION['default_language']
+        try:
+            self._backend = WhisperNetBackend(model_name, lang)
+            print("[SpeechRecognizer] Backend: WhisperNet (Vulkan GPU)")
+        except Exception as e:
+            print(f"[SpeechRecognizer] WhisperNet недоступен: {e} — fallback на faster-whisper")
+            self._backend = FasterWhisperBackend(model_name, lang)
+            print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
+
     def _ensure_temp_dir(self):
         temp_dir = SPEECH_RECOGNITION['temp_dir']
         try:

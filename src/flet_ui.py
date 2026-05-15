@@ -19,6 +19,7 @@ class FletAudioAssistantUI:
         self.is_recording = False
         self.is_processing = False
         self.assistant_active = False
+        self.postprocess_enabled = False
 
         self.transcription_buffer = []
 
@@ -137,6 +138,11 @@ class FletAudioAssistantUI:
                 
                 transcription = self.speech_recognizer.transcribe_audio_data(frames, language=lang)
                 if transcription:
+                    if self.postprocess_enabled and self.chatgpt_client:
+                        try:
+                            transcription = self.chatgpt_client.polish_transcription(transcription)
+                        except Exception:
+                            pass
                     self.append_transcription(transcription, speaker)
             time.sleep(0.1)
 
@@ -214,14 +220,17 @@ class FletAudioAssistantUI:
         if api_key:
             self.chatgpt_client.api_key = api_key
         self.chatgpt_client.model = model
+        self.chatgpt_client._reinit_client()
+
+        self.postprocess_enabled = self.sw_postprocess.value
 
         if self.env_path:
             self._save_env(api_key, base_url, model)
 
         self.show_snack("Настройки применены", ft.colors.GREEN_600)
 
-    def _save_env(self, api_key: str, base_url: str, model: str):
-        """Сохраняет настройки API в .env файл."""
+    def _save_env(self, api_key: str, base_url: str, model: str, whisper_model: str = None):
+        """Сохраняет настройки в .env файл."""
         import re
         try:
             try:
@@ -246,12 +255,71 @@ class FletAudioAssistantUI:
                 lines = set_var(lines, 'OPENAI_API_BASE', base_url)
             if model:
                 lines = set_var(lines, 'CHATGPT_MODEL', model)
+            if whisper_model:
+                lines = set_var(lines, 'WHISPER_MODEL', whisper_model)
 
             os.makedirs(os.path.dirname(self.env_path), exist_ok=True)
             with open(self.env_path, 'w', encoding='utf-8') as f:
                 f.writelines(lines)
         except Exception as ex:
             print(f"[Settings] Не удалось сохранить .env: {ex}")
+
+    def _open_settings(self, e=None):
+        if self.chatgpt_client:
+            key = self.chatgpt_client.api_key or ''
+            if key == 'local':
+                key = ''
+            self.tb_api_key.value = key
+            self.tb_base_url.value = self.chatgpt_client.base_url or ''
+            self.dd_llm.value = self.chatgpt_client.model
+        self.sw_postprocess.value = self.postprocess_enabled
+        self.settings_dlg.open = True
+        self.page.update()
+
+    def _fetch_llm_models(self, e=None):
+        if not self.chatgpt_client: return
+        base_url = self.tb_base_url.value.strip() or None
+        api_key = self.tb_api_key.value.strip() or None
+
+        def _do():
+            try:
+                models = self.chatgpt_client.fetch_available_models(base_url=base_url, api_key=api_key)
+                if models:
+                    self.dd_llm.options = [ft.dropdown.Option(m) for m in models]
+                    if self.dd_llm.value not in models:
+                        self.dd_llm.value = models[0]
+                    self.page.update()
+                    self.show_snack(f"Загружено {len(models)} моделей", ft.colors.GREEN_600)
+                else:
+                    self.show_snack("Нет доступных моделей", ft.colors.ORANGE_400)
+            except Exception as ex:
+                self.show_snack(f"Ошибка загрузки моделей: {ex}", ft.colors.RED_400)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _change_whisper_model(self, e):
+        if not self.speech_recognizer: return
+        model_name = e.control.value
+        if not model_name or model_name == self.speech_recognizer.model_name: return
+
+        self.btn_record.disabled = True
+        self.status_text.value = f"Загрузка модели {model_name}..."
+        self.page.update()
+
+        def _do():
+            try:
+                self.speech_recognizer.set_model(model_name)
+                self.status_text.value = f"Модель {model_name} готова"
+                if self.env_path:
+                    self._save_env('', '', '', whisper_model=model_name)
+            except Exception as ex:
+                self.status_text.value = "Ошибка загрузки модели"
+                self.show_snack(f"Ошибка загрузки модели: {ex}", ft.colors.RED_400)
+            finally:
+                self.btn_record.disabled = False
+                self.page.update()
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def setup_ui(self):
         # Top App Bar
@@ -260,22 +328,53 @@ class FletAudioAssistantUI:
             center_title=False,
             bgcolor=ft.colors.SURFACE_VARIANT,
             actions=[
-                ft.IconButton(ft.icons.SETTINGS, on_click=lambda e: setattr(self.settings_dlg, 'open', True) or self.page.update()),
+                ft.IconButton(ft.icons.SETTINGS, on_click=self._open_settings),
                 ft.Container(width=10)
             ]
         )
 
         # Settings Dialog
         self.tb_api_key = ft.TextField(label="API Key (OpenAI)", password=True, can_reveal_password=True)
-        self.tb_base_url = ft.TextField(label="Base URL (пусто = OpenAI, или LM Studio: http://127.0.0.1:1234/v1)")
-        self.dd_llm = ft.Dropdown(label="LLM Model", options=[
-            ft.dropdown.Option("gpt-4o"), ft.dropdown.Option("gpt-4-turbo"), ft.dropdown.Option("gpt-3.5-turbo")
-        ], value="gpt-4o")
+        self.tb_base_url = ft.TextField(label="Base URL (пусто = OpenAI; LM Studio: http://127.0.0.1:1234/v1)")
+        self.dd_llm = ft.Dropdown(
+            label="LLM Model",
+            options=[
+                ft.dropdown.Option("gpt-4o"),
+                ft.dropdown.Option("gpt-4-turbo"),
+                ft.dropdown.Option("gpt-3.5-turbo"),
+            ],
+            value=CHATGPT_SETTINGS.get('default_model', 'gpt-4o'),
+            expand=True,
+        )
+        self.sw_postprocess = ft.Switch(
+            label="LLM-полировка транскрипта",
+            value=False,
+            tooltip="Исправлять пунктуацию каждого фрагмента через LLM (добавляет задержку)",
+        )
 
         self.settings_dlg = ft.AlertDialog(
-            title=ft.Text("Настройки API"),
-            content=ft.Column([self.tb_api_key, self.tb_base_url, self.dd_llm], tight=True),
-            actions=[ft.TextButton("Применить", on_click=lambda e: [self.apply_api_settings(), setattr(self.settings_dlg, 'open', False), self.page.update()])]
+            title=ft.Text("Настройки"),
+            content=ft.Container(
+                width=420,
+                content=ft.Column([
+                    self.tb_api_key,
+                    self.tb_base_url,
+                    ft.Row([
+                        self.dd_llm,
+                        ft.IconButton(
+                            ft.icons.SYNC,
+                            tooltip="Загрузить список моделей с сервера",
+                            on_click=self._fetch_llm_models,
+                        ),
+                    ], vertical_alignment=ft.CrossAxisAlignment.END),
+                    ft.Divider(),
+                    self.sw_postprocess,
+                ], tight=True, spacing=8),
+            ),
+            actions=[
+                ft.TextButton("Отмена", on_click=lambda e: [setattr(self.settings_dlg, 'open', False), self.page.update()]),
+                ft.TextButton("Применить", on_click=lambda e: [self.apply_api_settings(), setattr(self.settings_dlg, 'open', False), self.page.update()]),
+            ],
         )
         self.page.overlay.append(self.settings_dlg)
 
@@ -285,6 +384,22 @@ class FletAudioAssistantUI:
         self.dd_language = ft.Dropdown(label="Язык", options=[
             ft.dropdown.Option("ru"), ft.dropdown.Option("en"), ft.dropdown.Option("auto")
         ], value="ru", text_size=13)
+
+        _cur_model = getattr(self.speech_recognizer, 'model_name', 'base') if self.speech_recognizer else 'base'
+        self.dd_whisper = ft.Dropdown(
+            label="Модель Whisper",
+            options=[
+                ft.dropdown.Option(key="tiny", text="tiny (~75 MB, быстрая)"),
+                ft.dropdown.Option(key="base", text="base (~142 MB)"),
+                ft.dropdown.Option(key="small", text="small (~466 MB, лучше)"),
+                ft.dropdown.Option(key="medium", text="medium (~1.5 GB, хорошая)"),
+                ft.dropdown.Option(key="large-v3-turbo", text="large-v3-turbo (~1.6 GB)"),
+                ft.dropdown.Option(key="large-v3", text="large-v3 (~3.1 GB, макс.)"),
+            ],
+            value=_cur_model,
+            text_size=13,
+            on_change=self._change_whisper_model,
+        )
 
         self.btn_record = ft.ElevatedButton(
             icon=ft.icons.FIBER_MANUAL_RECORD_ROUNDED, 
@@ -310,6 +425,7 @@ class FletAudioAssistantUI:
                 ft.Divider(height=20),
                 ft.Text("Настройки", weight=ft.FontWeight.BOLD),
                 self.dd_language,
+                self.dd_whisper,
                 ft.Divider(height=20),
                 ft.Row([self.btn_record, self.pulse_ring], alignment=ft.MainAxisAlignment.START),
                 self.status_text,

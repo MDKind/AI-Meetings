@@ -52,6 +52,22 @@ class ChatGPTClient:
         else:
             self.client = None  # LM Studio Runtime или API не настроен
 
+    def _reinit_client(self):
+        """Пересоздаёт OpenAI client после смены api_key или base_url."""
+        self._lmstudio_runtime = _is_lmstudio_runtime(self.base_url)
+        if self._lmstudio_runtime:
+            self.client = None
+            return
+        effective_key = self.api_key or ('local' if self.base_url else '')
+        if not effective_key:
+            self.client = None
+            return
+        from openai import OpenAI
+        kwargs = {'api_key': effective_key}
+        if self.base_url:
+            kwargs['base_url'] = self.base_url
+        self.client = OpenAI(**kwargs)
+
     # ── Низкоуровневые методы отправки ────────────────────────────────────────
 
     def _chat_openai(self, messages, max_tokens):
@@ -198,6 +214,41 @@ class ChatGPTClient:
         except Exception as e:
             print(f"Ошибка при генерации саммари: {e}")
             return f"Ошибка при создании саммари: {str(e)}"
+
+    def polish_transcription(self, text: str) -> str:
+        """Улучшает сырой транскрипт через LLM: пунктуация и грамматика."""
+        if not text.strip():
+            return text
+        messages = [
+            {"role": "system", "content": "Ты редактор. Исправь пунктуацию и грамматику текста. Верни только исправленный текст, без пояснений."},
+            {"role": "user", "content": text},
+        ]
+        try:
+            return self._send(messages, max_tokens=min(len(text) * 2 + 100, 1000))
+        except Exception as e:
+            print(f"[ChatGPT] Ошибка полировки транскрипта: {e}")
+            return text
+
+    def fetch_available_models(self, base_url=None, api_key=None) -> list:
+        """Получает список доступных моделей с сервера."""
+        _base_url = base_url if base_url is not None else self.base_url
+        _api_key = api_key if api_key is not None else self.api_key
+
+        if not _base_url:
+            if not self.client:
+                return []
+            response = self.client.models.list()
+            return sorted(m.id for m in response.data)
+
+        url = _base_url.rstrip('/') + '/models'
+        headers = {}
+        if _api_key and _api_key not in ('', 'local'):
+            headers['Authorization'] = f'Bearer {_api_key}'
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        items = data if isinstance(data, list) else data.get('data', [])
+        return [m.get('id', str(m)) if isinstance(m, dict) else str(m) for m in items]
 
     def save_conversation(self, filename=None):
         if filename is None:

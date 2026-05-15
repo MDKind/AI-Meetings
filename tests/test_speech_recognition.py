@@ -1,6 +1,6 @@
 import os
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 @pytest.fixture(autouse=True)
@@ -127,3 +127,56 @@ class TestFasterWhisperEnsureModel:
             FasterWhisperBackend._ensure_model("medium")
 
         assert captured["repo_id"] == "Systran/faster-whisper-medium"
+
+
+class TestSetModel:
+    def _make_recognizer(self, model_name="base", language="ru"):
+        from src.speech_recognition import SpeechRecognizer
+        sr = SpeechRecognizer.__new__(SpeechRecognizer)
+        sr.model_name = model_name
+        sr._backend = MagicMock()
+        sr._backend._language = language
+        return sr
+
+    def test_noop_if_same_model(self):
+        from src.speech_recognition import SpeechRecognizer
+        sr = self._make_recognizer("base")
+        original_backend = sr._backend
+        sr.set_model("base")
+        assert sr._backend is original_backend
+        assert sr.model_name == "base"
+
+    def test_changes_model_name_and_uses_whisper_net(self):
+        from src.speech_recognition import SpeechRecognizer
+        sr = self._make_recognizer("base", "ru")
+        mock_backend = MagicMock()
+
+        def fake_close():
+            sr._backend = None
+
+        with patch("src.speech_recognition.WhisperNetBackend", return_value=mock_backend) as mock_cls:
+            with patch.object(sr, "_ensure_temp_dir"):
+                with patch.object(sr, "close", side_effect=fake_close):
+                    sr.set_model("small")
+
+        assert sr.model_name == "small"
+        mock_cls.assert_called_once_with("small", "ru")
+        assert sr._backend is mock_backend
+
+    def test_falls_back_to_faster_whisper_when_whisper_net_fails(self):
+        from src.speech_recognition import SpeechRecognizer
+        sr = self._make_recognizer("base", "en")
+        mock_backend = MagicMock()
+
+        def fake_close():
+            sr._backend = None
+
+        with patch("src.speech_recognition.WhisperNetBackend", side_effect=RuntimeError("no exe")):
+            with patch("src.speech_recognition.FasterWhisperBackend", return_value=mock_backend) as mock_cls:
+                with patch.object(sr, "_ensure_temp_dir"):
+                    with patch.object(sr, "close", side_effect=fake_close):
+                        sr.set_model("medium")
+
+        assert sr.model_name == "medium"
+        mock_cls.assert_called_once_with("medium", "en")
+        assert sr._backend is mock_backend
