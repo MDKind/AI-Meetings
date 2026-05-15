@@ -94,6 +94,7 @@ build_venv/
 test_venv/
 
 .claude
+context.md
 
 # Сохранённые разговоры и саммари (генерируются пользователем)
 conversation_*.json
