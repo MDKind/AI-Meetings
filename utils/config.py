@@ -51,9 +51,10 @@ CHATGPT_SETTINGS = {
 
 # ── Настройки UI ──────────────────────────────────────────────────────────────
 UI_SETTINGS = {
-    'window_title': 'Аудио-ассистент для встреч',
-    'window_size': '900x700',
-    'font_size': 10,
+    'window_title': 'AI Meetings',
+    'window_width': 1000,
+    'window_height': 700,
+    'font_size': 14,
 }
 
 # ── Создаём temp-директорию при необходимости ─────────────────────────────────

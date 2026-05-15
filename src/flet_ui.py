@@ -34,10 +34,10 @@ class FletAudioAssistantUI:
                 return "1.0.0"
 
         self.version = get_version()
-        self.page.title = f"AI Meetings v{self.version}"
+        self.page.title = f"{UI_SETTINGS['window_title']} v{self.version}"
         self.page.theme_mode = ft.ThemeMode.DARK
-        self.page.window.width = 1000
-        self.page.window.height = 700
+        self.page.window.width = UI_SETTINGS['window_width']
+        self.page.window.height = UI_SETTINGS['window_height']
         self.page.padding = 0
         self.page.fonts = {
             "Inter": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
