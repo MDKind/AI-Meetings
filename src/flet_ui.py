@@ -81,7 +81,6 @@ class FletAudioAssistantUI:
         # Update language/model settings
         lang = self.dd_language.value
         if lang == "auto": lang = None
-        self.speech_recognizer.language = lang
 
         if self.chatgpt_client:
             self.chatgpt_client.model = self.dd_llm.value
@@ -207,13 +206,53 @@ class FletAudioAssistantUI:
 
     def apply_api_settings(self, e=None):
         if not self.chatgpt_client: return
-        self.chatgpt_client.base_url = self.tb_base_url.value.strip() or None
-        if self.tb_api_key.value.strip():
-            self.chatgpt_client.api_key = self.tb_api_key.value.strip()
-        self.chatgpt_client.model = self.dd_llm.value
+        api_key = self.tb_api_key.value.strip()
+        base_url = self.tb_base_url.value.strip()
+        model = self.dd_llm.value
+
+        self.chatgpt_client.base_url = base_url or None
+        if api_key:
+            self.chatgpt_client.api_key = api_key
+        self.chatgpt_client.model = model
+
+        if self.env_path:
+            self._save_env(api_key, base_url, model)
+
         self.show_snack("Настройки применены", ft.colors.GREEN_600)
-        
-        # Save to .env logic can go here
+
+    def _save_env(self, api_key: str, base_url: str, model: str):
+        """Сохраняет настройки API в .env файл."""
+        import re
+        try:
+            try:
+                with open(self.env_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+            except FileNotFoundError:
+                lines = []
+
+            def set_var(lines, key, value):
+                pattern = re.compile(rf'^{re.escape(key)}\s*=.*$', re.MULTILINE)
+                entry = f'{key}={value}\n'
+                for i, line in enumerate(lines):
+                    if pattern.match(line):
+                        lines[i] = entry
+                        return lines
+                lines.append(entry)
+                return lines
+
+            if api_key:
+                lines = set_var(lines, 'OPENAI_API_KEY', api_key)
+            if base_url:
+                lines = set_var(lines, 'OPENAI_API_BASE', base_url)
+            if model:
+                lines = set_var(lines, 'CHATGPT_MODEL', model)
+
+            import os
+            os.makedirs(os.path.dirname(self.env_path), exist_ok=True)
+            with open(self.env_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+        except Exception as ex:
+            print(f"[Settings] Не удалось сохранить .env: {ex}")
 
     def setup_ui(self):
         # Top App Bar

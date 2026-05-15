@@ -85,11 +85,6 @@ def main():
         from src.chatgpt_client import ChatGPTClient
         chatgpt_client = ChatGPTClient()
         
-        update_progress(0.7, "Инициализация модуля саммаризации...")
-        
-        from src.meeting_summarizer import MeetingSummarizer
-        meeting_summarizer = MeetingSummarizer(chatgpt_client)
-        
         update_progress(0.9, "Создание пользовательского интерфейса...")
         
         # Запускаем Flet UI

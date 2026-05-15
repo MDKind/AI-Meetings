@@ -1,162 +1,210 @@
 # AI Meetings — Аудио-ассистент для встреч
 
-Запись, транскрипция и умное саммари встреч в стиле **Plaud Note** с интеграцией LLM (OpenAI / LM Studio / Ollama).
+Запись, транскрипция и умное саммари встреч с интеграцией LLM (OpenAI / LM Studio / Ollama).
 
 ## Возможности
 
-- Запись микрофона и системного звука одновременно
-- Распознавание речи (faster-whisper / CTranslate2) — 2-4x быстрее openai-whisper
-- Голосовая активация (Silero VAD) — без ложных срабатываний на фон
-- Интеграция с OpenAI API и любым OpenAI-совместимым сервером
-- **Умное саммари (Plaud Note Style):** Выделение главных тем, интеллект-карт и задач (Action Items)
-- **Современный UI:** Кроссплатформенный премиум-интерфейс на базе Flutter (Flet)
+- Запись микрофона и системного звука одновременно (WASAPI loopback)
+- Распознавание речи — два бэкенда с автоматическим выбором:
+  - **WhisperNet** (primary): C# + whisper.net + Vulkan GPU — работает на любом GPU через DirectX
+  - **faster-whisper** (fallback): CTranslate2, CPU int8 — 2-4× быстрее openai-whisper без GPU
+- Голосовая активация (Silero VAD / RMS fallback) — без ложных срабатываний на фон
+- Саммари встречи через OpenAI API или любой OpenAI-совместимый сервер (LM Studio, Ollama)
+- Современный UI на Flutter (Flet) с тёмной темой
+- Настройки API сохраняются в `.env` через UI-диалог
 
 ## Установка для конечного пользователя
 
-Запустите `dist\AI_Meetings_Setup.exe` — мастер установит приложение, FFmpeg и предложит ввести API-ключ.
+Запустите `dist\AI_Meetings_Setup_v*.exe` — мастер установит приложение и предложит ввести API-ключ.  
+При первом запуске приложение автоматически скачает модель Whisper (~75–150 MB) в `%LOCALAPPDATA%\AI Meetings\models\`.
 
 ## Dev: сборка
 
 ### Требования
 
-- Windows 10/11 64-bit
-- Python 3.13 (проверено на 3.13.7)
+- Windows 10/11 64-bit (WASAPI, Vulkan)
+- Python 3.11 (проверено; 3.13 тоже работает)
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — для сборки WhisperService
 - Inno Setup 6 (`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`)
 
 ### Структура
 
 ```
 AI_Meetings/
-├── main.py                   # Точка входа
-├── src/                      # Исходный код
-│   ├── flet_ui.py            # Современный Flet интерфейс
-│   ├── speech_recognition.py # faster-whisper (НЕ openai-whisper)
-│   ├── vad.py                # Silero VAD + RMS fallback (torch опционален)
-│   ├── audio_capture.py      # WASAPI захват
-│   └── ...
-├── utils/                    # Конфиг и утилиты
+├── main.py                    # Точка входа (splash + инициализация компонентов)
+├── src/
+│   ├── flet_ui.py             # Flet UI
+│   ├── speech_recognition.py  # WhisperNet + faster-whisper (dual backend)
+│   ├── audio_capture.py       # WASAPI захват микрофона + системного звука, VAD, сегментация
+│   ├── system_audio_capture.py# WASAPI loopback (pyaudiowpatch)
+│   ├── vad.py                 # Silero VAD (torch опционален) + RMS fallback
+│   ├── chatgpt_client.py      # OpenAI / совместимый API клиент
+│   └── meeting_summarizer.py  # Саммаризация через LLM
+├── utils/
+│   ├── config.py              # AUDIO_SETTINGS, SPEECH_RECOGNITION, CHATGPT_SETTINGS, UI_SETTINGS
+│   └── storage.py
+├── whisper_service/           # C# .NET 8 сервис транскрипции (whisper.net + Vulkan)
+│   ├── WhisperService.csproj
+│   └── Program.cs             # Бинарный IPC протокол stdin/stdout с Python
+├── tests/
 ├── installer/
-│   ├── setup.iss             # InnoSetup скрипт (пути относительные — ..\dist и т.д.)
-│   ├── build_now.ps1         # Быстрая сборка инсталлятора (рекомендуется)
-│   ├── build_installer.ps1   # Полная сборка с загрузкой FFmpeg
-│   ├── assets/               # icon.ico, wizard.bmp, icon_small.bmp
-│   └── bundled/ffmpeg/       # ffmpeg.exe, ffprobe.exe (не в git)
-├── AI_Meetings.spec          # PyInstaller spec
-├── build_venv/               # Чистый venv для PyInstaller (не в git)
-└── dist/                     # Артефакты сборки (не в git)
-    ├── AI_Meetings.exe       # PyInstaller bundle
-    └── AI_Meetings_Setup.exe # InnoSetup инсталлятор
+│   ├── setup.iss              # Inno Setup скрипт (пути относительные — патчатся build_now.ps1)
+│   ├── build_now.ps1          # Сборка инсталлятора (рекомендуется)
+│   ├── assets/                # icon.ico, wizard.bmp, icon_small.bmp
+│   └── bundled/ffmpeg/        # ffmpeg.exe, ffprobe.exe (не в git)
+├── data/
+│   └── whisper_service/       # Артефакт dotnet publish (не в git)
+├── AI_Meetings.spec           # PyInstaller spec
+├── version.txt                # Единый источник версии (например: 1.0.0)
+└── dist/                      # Артефакты сборки (не в git)
+    ├── AI_Meetings.exe
+    └── AI_Meetings_Setup_v*.exe
 ```
 
 ### Шаг 1: Создать чистый venv для сборки
 
 ```powershell
 python -m venv build_venv
-build_venv\Scripts\pip install faster-whisper numpy scipy sounddevice pyaudio `
-    comtypes pycaw pydub openai python-dotenv requests pillow `
-    tiktoken numba llvmlite pyinstaller flet
+build_venv\Scripts\pip install faster-whisper numpy sounddevice pyaudiowpatch `
+    openai python-dotenv requests pyinstaller flet
 ```
 
-**Важно:** НЕ устанавливать torch, tensorflow, keras, transformers в build_venv.
-faster-whisper использует CTranslate2 (не torch) — бандл получается меньше.
+**Важно:** НЕ устанавливать torch, tensorflow, keras, transformers в build_venv.  
+faster-whisper использует CTranslate2 (не torch) — бандл получается компактнее.
 
-### Шаг 2: Собрать AI_Meetings.exe
+### Шаг 2: Собрать WhisperService (.NET 8)
+
+```powershell
+dotnet publish whisper_service/WhisperService.csproj -c Release -r win-x64 --self-contained true -o data/whisper_service
+```
+
+Результат: `data/whisper_service/WhisperService.exe` + Vulkan runtime DLL.
+
+### Шаг 3: Собрать AI_Meetings.exe
 
 ```powershell
 build_venv\Scripts\python.exe -m PyInstaller AI_Meetings.spec --clean
 ```
 
-Результат: `dist\AI_Meetings.exe` (~613 MB).
+Результат: `dist\AI_Meetings.exe` (single-file bundle).
 
-### Шаг 3: Собрать инсталлятор
+### Шаг 4: Собрать инсталлятор
 
 ```powershell
 cd installer
 .\build_now.ps1
 ```
 
-Результат: `dist\AI_Meetings_Setup.exe`.
+Результат: `dist\AI_Meetings_Setup_v<version>.exe`.
 
-**Как работает build_now.ps1:**
-1. Проверяет наличие `dist\AI_Meetings.exe`
+**Что делает build_now.ps1:**
+1. Проверяет наличие `dist\AI_Meetings.exe` и `data\whisper_service\WhisperService.exe`
 2. Создаёт `assets\` если нет (placeholder иконка/bitmap)
-3. Загружает FFmpeg в `bundled\ffmpeg\` если нет
-4. Патчит `setup.iss` (заменяет относительные пути `..\dist` → абсолютные) через `.Replace()` (не regex!)
-5. Запускает `ISCC.exe` через оператор `&` (не `Start-Process -Wait`, который зависает в bash)
-6. Временный патченный .iss сохраняется в `%TEMP%\ai_meetings_setup.iss`
+3. Скачивает FFmpeg в `bundled\ffmpeg\` если нет
+4. Патчит `setup.iss` (заменяет относительные пути `..\dist` → абсолютные) через `.Replace()` (не regex — нет проблем с backslash)
+5. Подставляет версию из `version.txt` в имя файла, метаданные инсталлятора
+6. Запускает `ISCC.exe` через оператор `&`
 
-**Если нужно запустить ISCC вручную (из bash/CI):**
-```powershell
-# PowerShell напрямую (не через cmd.exe):
-/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe `
-    -ExecutionPolicy Bypass -NonInteractive `
-    -File I:\Work\Dev\Repos\AI_Meetings\installer\build_now.ps1
-```
+## Релизы и версионирование
 
-## Релизы и версионирование (CI/CD)
+Единый источник версии — файл `version.txt` (например, `1.0.0`).
 
-Проект использует систему единого источника правды для версий (Single Source of Truth).
-Текущая версия хранится в файле `version.txt` (например, `1.0.0`). 
+Что обновляется автоматически при сборке:
 
-Для выпуска новой версии достаточно обновить этот файл. Система автоматически:
-1. Выведет версию в заголовок окна и интерфейс (Flet).
-2. Прошьет версию в метаданные собираемого PyInstaller EXE-файла.
-3. Соберет через Inno Setup готовый инсталлятор с правильным именем, например `AI_Meetings_Setup_v1.0.0.exe`.
+| Место | Как обновляется |
+|---|---|
+| Заголовок окна приложения | `flet_ui.py` читает `version.txt` в рантайме (бандл включает файл) |
+| Имя инсталлятора | `build_now.ps1` патчит: `AI_Meetings_Setup_v1.0.0.exe` |
+| Метаданные инсталлятора (Properties) | `build_now.ps1` патчит `VersionInfoVersion` и `VersionInfoProductVersion` в `setup.iss` |
+| Экран готовности Inno Setup | `setup.iss` использует `{#AppVersion}` напрямую |
+
+> **Чтобы выпустить новую версию** — достаточно обновить `version.txt` и запустить сборку.
 
 ### Сборка в GitHub Actions
-В проекте настроен пайплайн CI/CD (`.github/workflows/build.yml`). 
-При пуше в ветку `master` (или при ручном запуске через *workflow_dispatch* во вкладке Actions) GitHub автоматически собирает проект и инсталлятор, который затем доступен для скачивания в разделе **Artifacts**.
+
+При пуше в `master` (или ручном запуске через *workflow_dispatch*) CI автоматически:
+1. Собирает WhisperService через `dotnet publish`
+2. Прогоняет тесты (`pytest tests/`)
+3. Упаковывает `AI_Meetings.exe` через PyInstaller
+4. Собирает `AI_Meetings_Setup_v*.exe` через Inno Setup
+5. Публикует инсталлятор как **Artifact** (хранится 7 дней)
+
+Файл пайплайна: `.github/workflows/build.yml`.
 
 ## Настройка (.env)
 
-Скопируйте `.env.example` → `.env`:
+При установке создаётся `%LOCALAPPDATA%\AI Meetings\.env` (не перезаписывается при переустановке).  
+Для dev-запуска: скопируйте `.env.example` → `.env` в корне репозитория.
+
+Настройки также можно изменить через кнопку ⚙️ в приложении — они сохраняются в тот же `.env`.
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
 | `OPENAI_API_KEY` | — | Ключ OpenAI (обязателен для облака) |
 | `OPENAI_API_BASE` | пусто | URL для LM Studio / Ollama |
 | `CHATGPT_MODEL` | `gpt-4o` | Модель LLM |
-| `WHISPER_MODEL` | `base` | Размер модели Whisper (tiny/base/small/medium/large) |
+| `WHISPER_MODEL` | `base` | Размер модели (tiny/base/small/medium/large) |
 | `WHISPER_LANGUAGE` | `ru` | Язык распознавания |
 
-Примеры Base URL:
+Примеры `OPENAI_API_BASE`:
 - LM Studio: `http://127.0.0.1:1234/v1`
 - Ollama: `http://127.0.0.1:11434/v1`
 
-## GPU / Устройство вывода
+## Бэкенды транскрипции
 
-### NVIDIA (CUDA)
-Автоматически используется если установлен CUDA-драйвер. CTranslate2 определяет наличие CUDA через `get_supported_compute_types("cuda")`.
+### WhisperNet (primary, GPU via Vulkan)
 
-### AMD (ROCm)
-`ctranslate2` устанавливается с ROCm-поддержкой (`_rocm_sdk_core` в пакете). На Windows ROCm работает нестабильно — приложение автоматически падает на CPU если ROCm недоступен.
+C# сервис на основе [whisper.net](https://github.com/sandrohanea/whisper.net) с Vulkan-бэкендом.  
+Работает на любом GPU (NVIDIA, AMD, Intel) через DirectX 12 / Vulkan без установки CUDA.
 
-`torch-directml` (AMD GPU через DirectX 12) не поддерживает Python 3.11+ — использовать нельзя.
+Python запускает `WhisperService.exe` как subprocess и общается по бинарному IPC-протоколу:
+- Python → C#: `int32(len)` + WAV bytes
+- C# → Python: `int32(len)` + UTF-8 text
 
-### CPU (fallback)
-Всегда работает. faster-whisper с int8-квантизацией на CPU в 2-4x быстрее openai-whisper.
+При смене языка сервис перезапускается автоматически.  
+Если `WhisperService.exe` не найден — автоматический переход на faster-whisper.
 
-Логика выбора устройства — `src/speech_recognition.py`, функция `_select_device()`.
+### faster-whisper (fallback, CPU)
+
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2, int8-квантизация.  
+Работает без GPU. Модели скачиваются при первом запуске в `%LOCALAPPDATA%\AI Meetings\models\faster-whisper-<name>\`.
+
+Если доступна CUDA — используется GPU (float16). Логика выбора: `speech_recognition.py`, функция `_select_ct2_device()`.
+
+### GGML-модели для WhisperNet
+
+GGML `.bin` файлы (формат whisper.cpp) скачиваются из HuggingFace в `%LOCALAPPDATA%\AI Meetings\models\`:
+
+| Модель | Размер | Точность |
+|---|---|---|
+| tiny | ~75 MB | низкая |
+| base | ~142 MB | хорошая для коротких фраз |
+| small | ~466 MB | хорошая |
+| medium | ~1.5 GB | высокая |
+| large-v3-turbo | ~1.6 GB | очень высокая, быстрее large |
+| large-v3 | ~3.1 GB | максимальная |
 
 ## Запись системного звука
 
-Для записи звука из браузера / видеозвонков:
+Захват звука из браузера / видеозвонков (Teams, Zoom, Meet) — через WASAPI loopback.  
+Выберите нужные динамики/наушники в поле **«Системный звук»** в UI.
 
+Если WASAPI loopback не работает:
 1. **Stereo Mix** — Панель управления → Звук → Запись → Показать отключённые устройства
 2. **VB-Audio Virtual Cable** — [vb-audio.com/Cable](https://vb-audio.com/Cable/)
 
-## Решение проблем
+## VAD (голосовая активация)
 
-```bash
-python tools\diagnose_audio_devices.py   # список аудио устройств
-python tools\check_dependencies.py       # проверка зависимостей
-```
+Используется для сегментации речи — не записывает тишину и фоновый шум.
 
-- Нет звука из браузера → `docs/RECORD_YOUTUBE_AUDIO.md`
-- Ошибки comtypes/pycaw → `docs/COMTYPES_ERROR_FIX.md`
+- **Silero VAD** (основной): нейросеть 1.8 MB, ~1 мс на чанк, обучена на переговорах. Требует `torch`.
+- **RMS VAD** (fallback): простой пороговый детектор, без зависимостей.
+
+В собранном бандле `torch` не включён → всегда используется RMS VAD.  
+Для разработки: `pip install torch --index-url https://download.pytorch.org/whl/cpu`
 
 ## Известные ограничения
 
-- Windows only (WASAPI, comtypes)
-- Модели Whisper скачиваются при первом запуске (~75 MB для `base`) в `~/.cache/huggingface/`
-- torch не включён в бандл — VAD (vad.py) использует RMS-детектор вместо Silero если torch недоступен
+- Windows only (WASAPI, Vulkan)
+- При первом запуске скачивается модель Whisper (~75–3100 MB в зависимости от размера)
+- Silero VAD недоступен в production-бандле (нет torch) — используется RMS VAD

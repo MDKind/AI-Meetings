@@ -302,19 +302,25 @@ class FasterWhisperBackend:
 
         print(f"[FasterWhisper] Скачивание модели Systran/faster-whisper-{model_name} (без symlinks)...")
         from huggingface_hub import snapshot_download
+        # disable_tqdm удалён в huggingface_hub>=0.17; отключаем прогресс через env var
+        # (актуально для GUI/--noconsole где stderr перенаправлен в DummyWriter)
+        _prev_disable = os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS")
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         try:
             snapshot_download(
                 repo_id=f"Systran/faster-whisper-{model_name}",
                 local_dir=local_dir,
-                local_dir_use_symlinks=False,
-                # Отключаем прогресс-бар, так как в GUI (без консоли) sys.stderr может быть None
-                disable_tqdm=True 
             )
         except Exception as e:
             # Если упало из-за записи в закрытый stdout/stderr или по сети
             print(f"[FasterWhisper] Ошибка при скачивании: {e}")
             if not os.path.exists(marker):
                 raise
+        finally:
+            if _prev_disable is None:
+                os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
+            else:
+                os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = _prev_disable
 
         # Проверяем, что model.bin действительно скачался
         if not os.path.exists(marker) or os.path.getsize(marker) == 0:

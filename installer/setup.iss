@@ -215,5 +215,5 @@ begin
   Result := MemoDirInfo + NewLine + NewLine +
             MemoGroupInfo + NewLine + NewLine +
             'Developer: Mikhail Depeshko' + NewLine +
-            'Version: 1.0';
+            'Version: {#AppVersion}';
 end;
