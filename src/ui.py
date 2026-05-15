@@ -128,21 +128,6 @@ class AudioAssistantUI:
             self.chatgpt_model_combobox.set(default_model)
         self.chatgpt_model_combobox.grid(row=0, column=5, padx=5, pady=5, sticky="w")
 
-        # Строка настроек API
-        api_frame = ttk.Frame(control_frame)
-        api_frame.pack(fill="x", pady=2)
-
-        ttk.Label(api_frame, text="API Base URL:", font=default_font).pack(side="left", padx=5)
-        self.api_base_url_var = tk.StringVar(value=self._get_default_api_base_url())
-        self.api_base_url_entry = ttk.Entry(api_frame, textvariable=self.api_base_url_var,
-                                            width=40, font=default_font)
-        self.api_base_url_entry.pack(side="left", padx=5)
-        ttk.Label(api_frame, text="(пусто = OpenAI)", font=("Arial", 8)).pack(side="left")
-        ttk.Button(api_frame, text="Применить", command=self.apply_api_settings,
-                   width=10).pack(side="left", padx=5)
-        self.api_status_label = ttk.Label(api_frame, text="", font=("Arial", 8), foreground="green")
-        self.api_status_label.pack(side="left", padx=5)
-        
         # Кнопки управления
         buttons_frame = ttk.Frame(control_frame)
         buttons_frame.pack(fill="x", pady=5)
@@ -172,11 +157,42 @@ class AudioAssistantUI:
         # Вкладка для саммари
         summary_frame = ttk.Frame(notebook, padding=5)
         notebook.add(summary_frame, text="Саммари встречи")
-        
-        self.summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD, 
+
+        self.summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD,
                                                     font=default_font, height=10)
         self.summary_text.pack(fill="both", expand=True)
-        
+
+        # Вкладка настроек API
+        settings_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(settings_tab, text="Настройки API")
+
+        api_grid = ttk.Frame(settings_tab)
+        api_grid.pack(fill="x", pady=5)
+
+        ttk.Label(api_grid, text="API Key:", font=default_font).grid(row=0, column=0, sticky="w", padx=5, pady=4)
+        self.api_key_var = tk.StringVar(value=self._get_default_api_key())
+        api_key_entry = ttk.Entry(api_grid, textvariable=self.api_key_var, width=50,
+                                  font=default_font, show="*")
+        api_key_entry.grid(row=0, column=1, padx=5, pady=4, sticky="ew")
+        ttk.Label(api_grid, text="(OpenAI: sk-...  |  локальный — оставьте пустым)", font=("Arial", 8)).grid(
+            row=0, column=2, padx=5, sticky="w")
+
+        ttk.Label(api_grid, text="Base URL:", font=default_font).grid(row=1, column=0, sticky="w", padx=5, pady=4)
+        self.api_base_url_var = tk.StringVar(value=self._get_default_api_base_url())
+        self.api_base_url_entry = ttk.Entry(api_grid, textvariable=self.api_base_url_var,
+                                            width=50, font=default_font)
+        self.api_base_url_entry.grid(row=1, column=1, padx=5, pady=4, sticky="ew")
+        ttk.Label(api_grid, text="(пусто = OpenAI  |  LM Studio: http://127.0.0.1:1234/api/v1)", font=("Arial", 8)).grid(
+            row=1, column=2, padx=5, sticky="w")
+
+        api_grid.columnconfigure(1, weight=1)
+
+        btn_row = ttk.Frame(settings_tab)
+        btn_row.pack(fill="x", pady=(4, 0))
+        ttk.Button(btn_row, text="Применить", command=self.apply_api_settings, width=12).pack(side="left", padx=5)
+        self.api_status_label = ttk.Label(btn_row, text="", font=("Arial", 9), foreground="green")
+        self.api_status_label.pack(side="left", padx=5)
+
         # Панель статуса
         status_frame = ttk.Frame(self.root)
         status_frame.pack(side=tk.BOTTOM, fill=tk.X)
@@ -195,6 +211,12 @@ class AudioAssistantUI:
         """Возвращает значение API base URL из конфига или пустую строку."""
         from utils.config import CHATGPT_SETTINGS
         return CHATGPT_SETTINGS.get('api_base_url', '') or ''
+
+    def _get_default_api_key(self):
+        """Возвращает API key из конфига или пустую строку."""
+        import os
+        from utils.config import CHATGPT_SETTINGS
+        return CHATGPT_SETTINGS.get('api_key', '') or os.getenv('OPENAI_API_KEY', '') or ''
 
     def _save_env(self, api_key, api_base, model):
         """Сохраняет настройки API в .env файл."""
@@ -245,11 +267,15 @@ class AudioAssistantUI:
 
         base_url = self.api_base_url_var.get().strip() or None
         model = self.chatgpt_model_combobox.get().strip()
+        api_key_input = getattr(self, 'api_key_var', None)
+        new_api_key = api_key_input.get().strip() if api_key_input else None
 
         try:
             # Обновляем параметры существующего клиента (не пересоздаём — история сохраняется)
             self.chatgpt_client.base_url = base_url
             self.chatgpt_client._lmstudio_runtime = _is_lmstudio_runtime(base_url)
+            if new_api_key:
+                self.chatgpt_client.api_key = new_api_key
             # Применяем модель только если она явно задана (не пустая)
             # Если пустая — дождёмся _fetch_models и она выставится оттуда
             if model:
@@ -268,7 +294,7 @@ class AudioAssistantUI:
                 self.chatgpt_client.client = OpenAI(**kw)
 
             # Сохраняем в .env сразу
-            self._save_env(api_key=None, api_base=base_url or '', model=model or '')
+            self._save_env(api_key=new_api_key or None, api_base=base_url or '', model=model or '')
 
             # Статус
             if base_url:
@@ -326,45 +352,28 @@ class AudioAssistantUI:
         self._save_env(api_key=None, api_base=(self.chatgpt_client.base_url or '') if self.chatgpt_client else '', model=selected)
 
     def refresh_devices(self):
-        """
-        Обновляет списки доступных аудио устройств
-        """
+        """Обновляет списки доступных аудио устройств, выбирая системный default."""
         if not self.audio_capture:
             return
-            
-        # Получаем списки устройств
+
         input_devices = self.audio_capture.list_input_devices()
         output_devices = self.audio_capture.list_output_devices()
-        
-        # Обновляем выпадающий список устройств ввода
-        self.input_device_combobox['values'] = []
-        input_device_strings = []
-        
-        for i, (device_id, name, device_type) in enumerate(input_devices):
-            if device_type in ["microphone", "system_sound"]:
-                # Микрофоны и системный звук
-                input_device_strings.append(f"{device_id}: {name}")
-        
-        self.input_device_combobox['values'] = input_device_strings
-        
-        if input_device_strings:
-            self.input_device_combobox.current(0)
-        
-        # Обновляем выпадающий список устройств вывода
-        self.output_device_combobox['values'] = []
-        output_device_strings = []
-        
-        for i, (device_id, name, device_type) in enumerate(output_devices):
-            if device_type == "output":
-                output_device_strings.append(f"{device_id}: {name}")
-        
-        self.output_device_combobox['values'] = output_device_strings
-        
-        if output_device_strings:
-            self.output_device_combobox.current(0)
-            
-        # Отображаем информацию о статусе
-        self.status_var.set(f"Найдено: {len(input_device_strings)} устройств ввода, {len(output_device_strings)} устройств вывода")
+
+        # Ввод
+        input_strings = [f"{idx}: {name}" for idx, name, _ in input_devices]
+        self.input_device_combobox['values'] = input_strings
+        default_in = next((i for i, (_, name, _) in enumerate(input_devices) if "[по умолчанию]" in name), 0)
+        if input_strings:
+            self.input_device_combobox.current(default_in)
+
+        # Вывод
+        output_strings = [f"{idx}: {name}" for idx, name, _ in output_devices]
+        self.output_device_combobox['values'] = output_strings
+        default_out = next((i for i, (_, name, _) in enumerate(output_devices) if "[по умолчанию]" in name), 0)
+        if output_strings:
+            self.output_device_combobox.current(default_out)
+
+        self.status_var.set(f"Устройств: {len(input_strings)} ввода, {len(output_strings)} вывода")
     
     def toggle_recording(self):
         """
@@ -727,73 +736,3 @@ class AudioAssistantUI:
         
         # Закрываем окно
         self.root.destroy()
-
-
-# Тестовый код (выполняется только при запуске файла напрямую)
-if __name__ == "__main__":
-    from src.audio_capture import AudioCapture
-    from src.speech_recognition import SpeechRecognizer
-    from src.chatgpt_client import ChatGPTClient
-    
-    # Создаем корневое окно
-    root = tk.Tk()
-    
-    try:
-        # Инициализируем компоненты
-        audio_capture = AudioCapture()
-        
-        # Для теста используем маленькую модель, чтобы быстрее загружалась
-        speech_recognizer = SpeechRecognizer(model_name="tiny")
-        
-        # Для теста без API ключа можно использовать заглушку
-        try:
-            chatgpt_client = ChatGPTClient()
-        except ValueError:
-            # Если API ключ не найден, используем заглушку
-            class DummyChatGPTClient:
-                def __init__(self):
-                    self.model = "gpt-3.5-turbo"
-                    self.conversation_history = []
-                
-                def add_message(self, content, role="user"):
-                    self.conversation_history.append({"role": role, "content": content})
-                
-                def get_response(self, prompt=None):
-                    if prompt:
-                        self.add_message(prompt)
-                    response = f"Это тестовый ответ на запрос: {prompt}"
-                    self.add_message(response, role="assistant")
-                    return response
-                
-                def generate_meeting_summary(self):
-                    return "Тестовое саммари встречи"
-                
-                def save_conversation(self, filename=None):
-                    if filename is None:
-                        filename = "test_conversation.json"
-                    print(f"Сохранение в {filename}")
-                    return filename
-                
-                def load_conversation(self, filename):
-                    print(f"Загрузка из {filename}")
-                    self.conversation_history = [
-                        {"role": "user", "content": "Тестовый запрос 1"},
-                        {"role": "assistant", "content": "Тестовый ответ 1"}
-                    ]
-                    return True
-                
-                def clear_conversation(self):
-                    self.conversation_history = []
-            
-            chatgpt_client = DummyChatGPTClient()
-            print("Внимание: Используется заглушка ChatGPT клиента. Установите API ключ для полной функциональности.")
-        
-        # Создаем интерфейс
-        ui = AudioAssistantUI(root, audio_capture, speech_recognizer, chatgpt_client)
-        
-        # Запускаем главный цикл
-        root.mainloop()
-        
-    except Exception as e:
-        messagebox.showerror("Ошибка", f"Ошибка при инициализации: {str(e)}")
-        root.destroy()

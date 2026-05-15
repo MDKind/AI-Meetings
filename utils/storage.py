@@ -1,7 +1,7 @@
 """
 utils/storage.py — единый интерфейс хранения транскрипций и саммари.
 
-Текущая реализация: JSON-файлы в %LOCALAPPDATA%\AI Meetings\sessions\
+Текущая реализация: JSON-файлы в %LOCALAPPDATA%\\AI Meetings\\sessions\\
 Будущая: подключаемая БД (SQLite / PostgreSQL / etc.) —
   достаточно заменить тело StorageBackend не меняя остальной код.
 

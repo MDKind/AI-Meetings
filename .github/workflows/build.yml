@@ -1,0 +1,44 @@
+name: Build AI Meetings
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install -r requirements.txt
+
+    - name: Build PyInstaller executable
+      run: |
+        python -m PyInstaller AI_Meetings.spec --clean
+
+    - name: Build Inno Setup Installer
+      run: |
+        cd installer
+        .\build_now.ps1
+
+    - name: Upload Installer Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: AI_Meetings_Installer
+        path: dist/AI_Meetings_Setup.exe
+        retention-days: 7

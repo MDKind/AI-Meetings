@@ -4,8 +4,7 @@
 # Аудио-захват и обработка
 numpy>=1.20.0
 sounddevice>=0.4.6
-pyaudiowpatch>=0.2.12  # WASAPI loopback захват системного звука (Windows)
-pyaudio>=0.2.11        # Опциональный fallback
+pyaudiowpatch>=0.2.12  # WASAPI loopback захват системного звука (Windows, форк PyAudio)
 
 # Распознавание речи (STT)
 faster-whisper>=1.0.0  # 2-4x быстрее openai-whisper, не требует torch
@@ -16,3 +15,6 @@ requests>=2.28.0       # HTTP для LM Studio Runtime API (/api/v1)
 
 # Конфигурация
 python-dotenv>=1.0.0
+
+# UI Фреймворк
+flet>=0.21.2,<0.24.0

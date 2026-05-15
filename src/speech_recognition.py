@@ -52,7 +52,35 @@ def _ggml_model_path(model_name: str) -> str:
             pct = count * block_size * 100 // total_size
             print(f"\r[WhisperNet] Скачивание: {min(pct, 100)}%", end='', flush=True)
 
-    urllib.request.urlretrieve(url, path, reporthook=_progress)
+    tmp_path = path + '.tmp'
+    try:
+        opener = urllib.request.build_opener()
+        opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+        urllib.request.install_opener(opener)
+        # Таймаут 30 сек на соединение; скачиваем во временный файл
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            total = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            with open(tmp_path, 'wb') as f:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        pct = downloaded * 100 // total
+                        print(f"\r[WhisperNet] Скачивание: {pct}%", end='', flush=True)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise RuntimeError(
+            f"Не удалось скачать модель Whisper ({model_name}).\n\n"
+            f"Проверьте подключение к интернету и доступность huggingface.co.\n\n"
+            f"Ошибка: {e}"
+        ) from e
     print(f"\n[WhisperNet] Модель сохранена: {path}")
     return path
 
@@ -75,12 +103,15 @@ class WhisperNetBackend:
         self._proc: subprocess.Popen | None = None
         self._ready_event = threading.Event()
         self._ready_error: str | None = None
+        self._language = language
 
         exe = self._find_service_exe()
         if not exe:
             raise RuntimeError("WhisperService.exe не найден")
 
         model_path = _ggml_model_path(model_name)
+        self._exe = exe
+        self._model_path = model_path
 
         print(f"[WhisperNet] Запуск сервиса: {exe}")
         self._proc = subprocess.Popen(
@@ -150,6 +181,39 @@ class WhisperNetBackend:
                 self._ready_error = "WhisperService завершился неожиданно"
                 self._ready_event.set()
 
+    def set_language(self, language: str):
+        """Меняет язык распознавания. Перезапускает сервис если язык изменился."""
+        lang = language or ''
+        if lang == self._language:
+            return
+        print(f"[WhisperNet] Смена языка: '{self._language}' → '{lang}', перезапуск сервиса...")
+        self._language = lang
+        # Завершаем текущий процесс
+        try:
+            if self._proc and self._proc.poll() is None:
+                self._proc.stdin.write(struct.pack('<i', 0))
+                self._proc.stdin.flush()
+                self._proc.wait(timeout=3)
+        except Exception:
+            if self._proc:
+                self._proc.kill()
+        # Запускаем новый процесс с новым языком
+        self._ready_event = threading.Event()
+        self._ready_error = None
+        self._proc = subprocess.Popen(
+            [self._exe, self._model_path, lang],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
+        if not self._ready_event.wait(timeout=60):
+            self._proc.kill()
+            raise RuntimeError("WhisperService не вышел в Ready после смены языка")
+        if self._ready_error:
+            raise RuntimeError(f"WhisperService ошибка после смены языка: {self._ready_error}")
+
     def transcribe(self, wav_bytes: bytes) -> str:
         with self._lock:
             if not self._proc or self._proc.poll() is not None:
@@ -218,6 +282,9 @@ class FasterWhisperBackend:
         self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
         self.language = language
         print("[FasterWhisper] Модель загружена!")
+
+    def set_language(self, language: str):
+        self.language = language
 
     NO_SPEECH_THRESHOLD = 0.6
 
@@ -308,6 +375,7 @@ class SpeechRecognizer:
                               language=SPEECH_RECOGNITION['default_language']) -> str:
         """
         Распознаёт речь из raw PCM bytes (16-bit, mono).
+        language: 'ru', 'en', None/'auto' — None означает авто-определение.
         """
         try:
             if isinstance(audio_data, list):
@@ -321,6 +389,20 @@ class SpeechRecognizer:
             rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
             if rms < 50:
                 return ""
+
+            # Пиковая нормализация: подтягиваем тихие/громкие записи к ~80% int16 range
+            peak = float(np.max(np.abs(samples.astype(np.float32))))
+            if peak > 0:
+                target = 32767.0 * 0.8
+                gain = min(target / peak, 8.0)  # не усиливаем больше чем в 8 раз
+                if abs(gain - 1.0) > 0.05:  # применяем только если разница заметна
+                    normalized = np.clip(samples.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
+                    audio_data = normalized.tobytes()
+
+            # Передаём язык в backend перед транскрипцией
+            effective_lang = language if language and language != 'auto' else None
+            if self._backend and hasattr(self._backend, 'set_language'):
+                self._backend.set_language(effective_lang or '')
 
             # Упаковываем в WAV в памяти
             wav_buf = self._to_wav_bytes(audio_data, sample_rate)

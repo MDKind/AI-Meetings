@@ -21,7 +21,11 @@ import sounddevice as _sd
 sd_dir = Path(_sd.__file__).parent
 sd_datas = [(str(sd_dir), 'sounddevice')]
 
-all_datas = ct2_datas + sd_datas
+# ── sv_ttk (Sun Valley theme — TCL files) ────────────────────────────────────
+# sv_ttk is no longer used, replaced by flet.
+sv_datas = []
+
+all_datas = ct2_datas + sd_datas + sv_datas
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
 hidden_imports = [
@@ -34,7 +38,7 @@ hidden_imports = [
     'av', 'av.audio',
     'onnxruntime',
     # Audio
-    'sounddevice', 'pyaudio',
+    'sounddevice', 'pyaudiowpatch',
     'comtypes', 'comtypes.client',
     # LLM / networking
     'openai', 'httpx', 'httpcore', 'anyio',
@@ -42,6 +46,7 @@ hidden_imports = [
     'tiktoken', 'tiktoken_ext', 'tiktoken_ext.openai_public',
     # UI / stdlib
     'tkinter', 'tkinter.ttk', 'tkinter.messagebox',
+    'flet',
     'dotenv', 'numpy',
     # numba/llvmlite needed by some ctranslate2 builds
     'numba', 'llvmlite',

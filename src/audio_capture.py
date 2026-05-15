@@ -2,11 +2,11 @@ import sounddevice as sd
 import threading
 import time
 import numpy as np
+from collections import deque
 from queue import Queue
 from datetime import datetime
 from utils.config import AUDIO_SETTINGS
 from src.system_audio_capture import SystemAudioCapture
-from src.audio_synchronizer import AudioSynchronizer, EnhancedAudioProcessor
 from src.vad import create_vad
 
 class AudioCapture:
@@ -35,10 +35,9 @@ class AudioCapture:
         self._mic_raw_queue = Queue()  # сырые чанки с микрофона (float32 int16)
         self.is_recording = False
         self.silence_threshold = silence_threshold
-        # 0.7 сек тишины достаточно для сегментации диалога (было 2.0 — слишком много)
-        self.silence_duration = AUDIO_SETTINGS.get('silence_duration_vad', 0.7)
-        # Максимальная длина сегмента: 15 сек (Whisper плохо работает с >30 сек)
-        self.max_segment_duration = AUDIO_SETTINGS.get('max_segment_duration', 15.0)
+        self.silence_duration = AUDIO_SETTINGS.get('silence_duration_vad', 1.2)
+        self.min_segment_duration = AUDIO_SETTINGS.get('min_segment_duration', 0.8)
+        self.max_segment_duration = AUDIO_SETTINGS.get('max_segment_duration', 20.0)
         self.stream = None
         self.streams = []
         self.current_frames = []
@@ -49,8 +48,13 @@ class AudioCapture:
 
         # VAD: Silero если доступен, иначе RMS
         self._vad = create_vad(threshold=0.5, rms_threshold=silence_threshold, sample_rate=rate)
-        self._vad_lock = threading.Lock()
         print(f"VAD инициализирован: {type(self._vad).__name__}")
+
+        # Pre-roll: ~0.3 сек чанков до момента обнаружения речи
+        # Silero VAD нужно несколько чанков для "разогрева" LSTM, начало фразы теряется
+        _preroll_chunks = max(1, int(0.3 * rate / chunk_size))
+        self._preroll: deque = deque(maxlen=_preroll_chunks)
+        self._sys_preroll: deque = deque(maxlen=_preroll_chunks)
 
         # Отдельный VAD + состояние для системного звука (изолировано от mic-пути)
         self._sys_vad = create_vad(threshold=0.5, rms_threshold=silence_threshold, sample_rate=rate)
@@ -58,66 +62,79 @@ class AudioCapture:
         self._sys_speaking = False
         self._sys_silent_chunks = 0
         self._sys_segment_start: datetime | None = None
-        
-        # Инициализируем синхронизатор и процессор
-        self.audio_sync = AudioSynchronizer(
-            sample_rate=self.rate,
-            channels=self.channels
-        )
-        self.audio_processor = EnhancedAudioProcessor(sample_rate=self.rate)
-        self.use_synchronizer = False
-        
+
+    @staticmethod
+    def _get_wasapi_devices():
+        """
+        Возвращает только WASAPI-устройства (без дублей MME/DirectSound/WDM).
+        Также возвращает индексы системных default-устройств.
+
+        Returns:
+            (devices, default_input_idx, default_output_idx)
+            devices: список dict из sd.query_devices() с добавленным полем 'sd_index'
+        """
+        try:
+            host_apis = sd.query_hostapis()
+            wasapi_api = next((a for a in host_apis if 'WASAPI' in a['name']), None)
+            wasapi_idx = wasapi_api['index'] if wasapi_api else None
+        except Exception:
+            wasapi_idx = None
+
+        all_devices = sd.query_devices()
+        try:
+            default_input_idx = sd.default.device[0]
+            default_output_idx = sd.default.device[1]
+        except Exception:
+            default_input_idx = None
+            default_output_idx = None
+
+        result = []
+        for i, dev in enumerate(all_devices):
+            # Показываем только WASAPI устройства (если WASAPI доступен)
+            if wasapi_idx is not None and dev.get('hostapi') != wasapi_idx:
+                continue
+            dev = dict(dev)
+            dev['sd_index'] = i
+            result.append(dev)
+
+        return result, default_input_idx, default_output_idx
+
     def list_input_devices(self):
         """
-        Выводит список доступных аудио устройств ввода (микрофоны)
-        
-        Returns:
-            list: Список кортежей (индекс, название, тип) устройств ввода
+        Возвращает список устройств ввода (только WASAPI, без дублей).
+        Returns: list of (index, display_name, device_type)
         """
-        devices = sd.query_devices()
-        input_devices = []
-        
-        print("\n=== УСТРОЙСТВА ВВОДА (МИКРОФОНЫ) ===")
-        for i, device in enumerate(devices):
-            if device['max_input_channels'] > 0:
-                name = device['name']
-                # Проверяем, является ли это виртуальным микрофоном или стереомикшером
-                if "stereo mix" in name.lower() or "стереомикшер" in name.lower() or "what u hear" in name.lower():
-                    device_type = "system_sound"
-                    input_devices.append((i, f"{name} (Системный звук)", device_type))
-                    print(f"Device {i}: {name} (Системный звук)")
-                else:
-                    device_type = "microphone"
-                    input_devices.append((i, f"{name} (Микрофон)", device_type))
-                    print(f"Device {i}: {name} (Микрофон)")
-                print(f"  Input channels: {device['max_input_channels']}")
-                print(f"  Default sample rate: {device['default_samplerate']}")
-                print()
-        
-        return input_devices
+        devices, default_input, _ = self._get_wasapi_devices()
+        result = []
+        for dev in devices:
+            if dev['max_input_channels'] <= 0:
+                continue
+            name = dev['name']
+            idx = dev['sd_index']
+            is_default = (idx == default_input)
+            suffix = " [по умолчанию]" if is_default else ""
+            if "stereo mix" in name.lower() or "стереомикшер" in name.lower() or "what u hear" in name.lower():
+                result.append((idx, f"{name} (Системный звук){suffix}", "system_sound"))
+            else:
+                result.append((idx, f"{name}{suffix}", "microphone"))
+        return result
 
     def list_output_devices(self):
         """
-        Выводит список доступных аудио устройств вывода (динамики, наушники)
-        
-        Returns:
-            list: Список кортежей (индекс, название, тип) устройств вывода
+        Возвращает список устройств вывода (только WASAPI, без дублей).
+        Returns: list of (index, display_name, device_type)
         """
-        devices = sd.query_devices()
-        output_devices = []
-        
-        print("\n=== УСТРОЙСТВА ВЫВОДА (ДИНАМИКИ, НАУШНИКИ) ===")
-        for i, device in enumerate(devices):
-            if device['max_output_channels'] > 0:
-                name = device['name']
-                device_type = "output"
-                output_devices.append((i, f"{name} (Вывод)", device_type))
-                print(f"Device {i}: {name} (Вывод)")
-                print(f"  Output channels: {device['max_output_channels']}")
-                print(f"  Default sample rate: {device['default_samplerate']}")
-                print()
-        
-        return output_devices
+        devices, _, default_output = self._get_wasapi_devices()
+        result = []
+        for dev in devices:
+            if dev['max_output_channels'] <= 0:
+                continue
+            name = dev['name']
+            idx = dev['sd_index']
+            is_default = (idx == default_output)
+            suffix = " [по умолчанию]" if is_default else ""
+            result.append((idx, f"{name}{suffix}", "output"))
+        return result
     
     def _process_audio_data(self, audio_data, speaker: str = "local"):
         """
@@ -131,20 +148,23 @@ class AudioCapture:
 
         # Конвертируем в float32 для VAD
         audio_f32 = audio_data.astype(np.float32) / 32767.0
-        with self._vad_lock:
-            is_speech = self._vad.is_speech(audio_f32)
+        is_speech = self._vad.is_speech(audio_f32)
 
         if is_speech:
             self.silent_chunks = 0
             if not self.speaking:
                 self.speaking = True
                 self._segment_start_time = datetime.now()
+                # Добавляем pre-roll чтобы не потерять начало фразы
+                self.current_frames.extend(self._preroll)
+            self._preroll.clear()
             self.current_frames.append(data)
 
             max_chunks = int(self.rate / self.chunk_size * self.max_segment_duration)
             if len(self.current_frames) >= max_chunks:
                 self._flush_segment(speaker=speaker)
         else:
+            self._preroll.append(data)
             self.silent_chunks += 1
             silence_chunks_threshold = int(self.rate / self.chunk_size * self.silence_duration)
 
@@ -167,6 +187,13 @@ class AudioCapture:
         """
         if not self.current_frames:
             return
+        # Фильтруем слишком короткие сегменты — Whisper даёт галлюцинации на них
+        min_chunks = int(self.rate / self.chunk_size * self.min_segment_duration)
+        if len(self.current_frames) < min_chunks:
+            self.current_frames = []
+            self.speaking = False
+            self._segment_start_time = None
+            return
         self.frames_queue.put({
             "frames": self.current_frames.copy(),
             "speaker": speaker,
@@ -186,11 +213,6 @@ class AudioCapture:
             return
             
         self.is_recording = False
-        
-        # Останавливаем синхронизатор
-        if self.use_synchronizer and self.audio_sync:
-            self.audio_sync.stop()
-            self.use_synchronizer = False
         
         # Останавливаем все потоки записи
         if hasattr(self, 'streams') and self.streams:
@@ -226,30 +248,8 @@ class AudioCapture:
                 "end_time"  : datetime — конец сегмента
             или None если очередь пуста.
         """
-        # Если синхронизатор активен, получаем данные оттуда
-        if self.use_synchronizer and self.audio_sync:
-            sync_audio = self.audio_sync.get_synchronized_audio(timeout=0.1)
-            if sync_audio is not None:
-                processed_audio = self.audio_processor.process(sync_audio)
-                int_audio = (processed_audio * 32767).astype(np.int16)
-                return {
-                    "frames": [int_audio.tobytes()],
-                    "speaker": "local",
-                    "start_time": datetime.now(),
-                    "end_time": datetime.now(),
-                }
-
         if not self.frames_queue.empty():
-            segment = self.frames_queue.get()
-            # Backward-compat: если в очереди старый формат (list), оборачиваем
-            if isinstance(segment, list):
-                return {
-                    "frames": segment,
-                    "speaker": "local",
-                    "start_time": datetime.now(),
-                    "end_time": datetime.now(),
-                }
-            return segment
+            return self.frames_queue.get()
         return None
     
     def start_enhanced_recording(self, input_device_index=None, output_device_index=None):
@@ -271,13 +271,14 @@ class AudioCapture:
         self.speaking = False
         self._segment_start_time = None
         self.streams = []
-        self.use_synchronizer = False  # Синхронизатор не используется
 
-        # Сбрасываем состояние системного аудио
+        # Сбрасываем состояние mic и system аудио
+        self._preroll.clear()
         self._sys_frames = []
         self._sys_speaking = False
         self._sys_silent_chunks = 0
         self._sys_segment_start = None
+        self._sys_preroll.clear()
         if hasattr(self._sys_vad, 'reset'):
             self._sys_vad.reset()
         if hasattr(self._vad, 'reset'):
@@ -348,56 +349,6 @@ class AudioCapture:
             except Exception:
                 pass
     
-    def _process_synchronized_audio(self):
-        """
-        Обрабатывает синхронизированное аудио и добавляет в очередь
-        """
-        print("Запущен поток обработки синхронизированного аудио")
-        
-        while self.is_recording and self.use_synchronizer:
-            try:
-                # Получаем синхронизированное аудио
-                sync_audio = self.audio_sync.get_synchronized_audio(timeout=0.5)
-                
-                if sync_audio is not None and len(sync_audio) > 0:
-                    # Применяем улучшение качества
-                    processed_audio = self.audio_processor.process(sync_audio)
-                    
-                    # Конвертируем в int16
-                    int_audio = (processed_audio * 32767).astype(np.int16)
-                    
-                    # Проверяем на тишину и речь
-                    volume = np.abs(int_audio).mean()
-                    
-                    if volume > self.silence_threshold:
-                        self.silent_chunks = 0
-                        
-                        if not self.speaking:
-                            self.speaking = True
-                            print("Речь обнаружена (синхронизированное аудио)")
-                        
-                        self.current_frames.append(int_audio.tobytes())
-                    else:
-                        self.silent_chunks += 1
-                        
-                        if self.speaking and self.silent_chunks > int(self.rate / self.chunk_size * self.silence_duration):
-                            self.speaking = False
-                            
-                            if self.current_frames:
-                                self.frames_queue.put(self.current_frames.copy())
-                                print(f"Фрагмент речи добавлен в очередь (синхронизированный)")
-                                self.current_frames = []
-                        
-                        elif self.speaking:
-                            self.current_frames.append(int_audio.tobytes())
-                            
-            except Exception as e:
-                print(f"Ошибка при обработке синхронизированного аудио: {e}")
-                
-            time.sleep(0.01)
-        
-        print("Поток обработки синхронизированного аудио завершен")
-
     def _process_system_chunk(self, chunk_i16_1d: np.ndarray):
         """
         Обрабатывает один chunk_size системного звука через изолированный VAD+сегментатор.
@@ -415,10 +366,14 @@ class AudioCapture:
             if not self._sys_speaking:
                 self._sys_speaking = True
                 self._sys_segment_start = datetime.now()
+                # Добавляем pre-roll чтобы не потерять начало фразы
+                self._sys_frames.extend(self._sys_preroll)
+            self._sys_preroll.clear()
             self._sys_frames.append(data)
             if len(self._sys_frames) >= max_chunks:
                 self._flush_sys_segment()
         else:
+            self._sys_preroll.append(data)
             self._sys_silent_chunks += 1
             if self._sys_speaking and self._sys_silent_chunks > silence_chunks_threshold:
                 self._flush_sys_segment()
@@ -427,6 +382,13 @@ class AudioCapture:
 
     def _flush_sys_segment(self):
         if not self._sys_frames:
+            return
+        min_chunks = int(self.rate / self.chunk_size * self.min_segment_duration)
+        if len(self._sys_frames) < min_chunks:
+            self._sys_frames = []
+            self._sys_speaking = False
+            self._sys_silent_chunks = 0
+            self._sys_segment_start = None
             return
         self.frames_queue.put({
             "frames": self._sys_frames.copy(),

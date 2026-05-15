@@ -45,10 +45,11 @@ class Program
         {
             factory = WhisperFactory.FromPath(modelPath);
 
-            processor = factory.CreateBuilder()
-                .WithLanguage(language)
-                .WithNoContext()
-                .Build();
+            var builder = factory.CreateBuilder().WithNoContext();
+            // Empty string or "auto" = auto-detect language
+            if (!string.IsNullOrEmpty(language) && language != "auto")
+                builder = builder.WithLanguage(language);
+            processor = builder.Build();
 
             Console.Error.WriteLine("[WhisperService] Ready");
 

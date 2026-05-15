@@ -59,24 +59,6 @@ def main():
     root.update()
     
     try:
-        # Проверяем конфигурацию API.
-        # Для локальных серверов (LM Studio / Ollama) ключ не нужен —
-        # достаточно указать OPENAI_API_BASE в .env.
-        api_key = os.getenv("OPENAI_API_KEY")
-        api_base = os.getenv("OPENAI_API_BASE", "")
-        if not api_key and not api_base:
-            messagebox.showerror(
-                "Ошибка конфигурации",
-                "Не найден API ключ и не задан Base URL.\n\n"
-                "Вариант 1 — OpenAI:\n"
-                "  OPENAI_API_KEY=sk-...\n\n"
-                "Вариант 2 — LM Studio / Ollama (ключ не нужен):\n"
-                "  OPENAI_API_BASE=http://127.0.0.1:1234/v1\n\n"
-                "Создайте файл .env в папке с приложением."
-            )
-            root.destroy()
-            return
-        
         # Инициализируем компоненты
         update_progress(0.1, "Инициализация компонента захвата аудио...")
         
@@ -100,50 +82,46 @@ def main():
         
         update_progress(0.9, "Создание пользовательского интерфейса...")
         
+        # Запускаем Flet UI
+        import flet as ft
+        from src.flet_ui import FletAudioAssistantUI
+        
+        def main_flet(page: ft.Page):
+            app = FletAudioAssistantUI(
+                page=page,
+                audio_capture=audio_capture,
+                speech_recognizer=speech_recognizer,
+                chatgpt_client=chatgpt_client,
+                realtime_assistant=None, # will add later if needed
+                env_path=_env_path
+            )
+        
         # Закрываем окно загрузки
         root.destroy()
         
-        # Создаем новое окно для приложения
-        app_root = tk.Tk()
-        
-        # Создаем интерфейс
-        from src.ui import AudioAssistantUI
-        from src.realtime_meeting_assistant import RealtimeMeetingAssistant
-        
-        # Создаем ассистента для встреч
-        realtime_assistant = RealtimeMeetingAssistant(
-            audio_capture=audio_capture,
-            speech_recognizer=speech_recognizer,
-            chatgpt_client=chatgpt_client,
-            meeting_summarizer=meeting_summarizer
-        )
-        
-        # Создаем UI
-        ui = AudioAssistantUI(
-            app_root,
-            audio_capture=audio_capture,
-            speech_recognizer=speech_recognizer,
-            chatgpt_client=chatgpt_client,
-            realtime_assistant=realtime_assistant,
-            env_path=_env_path
-        )
-        
-        # Запускаем главный цикл
-        app_root.mainloop()
+        ft.app(target=main_flet)
         
     except ModuleNotFoundError as e:
+        import tkinter.messagebox as messagebox
         messagebox.showerror(
-            "Ошибка импорта модуля", 
-            f"Не удалось импортировать необходимый модуль: {str(e)}.\n"
-            "Пожалуйста, убедитесь, что все зависимости установлены:\n"
-            "pip install -r requirements.txt"
+            "Ошибка импорта модуля",
+            f"Не удалось загрузить модуль: {str(e)}.\n"
+            "Попробуйте переустановить приложение."
         )
-        root.destroy()
-    
-    except Exception as e:
-        messagebox.showerror("Ошибка", f"Ошибка при инициализации приложения: {str(e)}")
-        root.destroy()
+        if 'root' in locals() and root.winfo_exists():
+            root.destroy()
 
+    except RuntimeError as e:
+        import tkinter.messagebox as messagebox
+        messagebox.showerror("Ошибка запуска", str(e))
+        if 'root' in locals() and root.winfo_exists():
+            root.destroy()
+
+    except Exception as e:
+        import tkinter.messagebox as messagebox
+        messagebox.showerror("Ошибка", f"Ошибка при инициализации приложения: {str(e)}")
+        if 'root' in locals() and root.winfo_exists():
+            root.destroy()
 
 if __name__ == "__main__":
     main()

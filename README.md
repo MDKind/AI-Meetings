@@ -1,6 +1,6 @@
 # AI Meetings — Аудио-ассистент для встреч
 
-Запись, транскрипция и саммари встреч с интеграцией LLM (OpenAI / LM Studio / Ollama).
+Запись, транскрипция и умное саммари встреч в стиле **Plaud Note** с интеграцией LLM (OpenAI / LM Studio / Ollama).
 
 ## Возможности
 
@@ -8,7 +8,8 @@
 - Распознавание речи (faster-whisper / CTranslate2) — 2-4x быстрее openai-whisper
 - Голосовая активация (Silero VAD) — без ложных срабатываний на фон
 - Интеграция с OpenAI API и любым OpenAI-совместимым сервером
-- Саммари встречи по кнопке
+- **Умное саммари (Plaud Note Style):** Выделение главных тем, интеллект-карт и задач (Action Items)
+- **Современный UI:** Кроссплатформенный премиум-интерфейс на базе Flutter (Flet)
 
 ## Установка для конечного пользователя
 
@@ -28,6 +29,7 @@
 AI_Meetings/
 ├── main.py                   # Точка входа
 ├── src/                      # Исходный код
+│   ├── flet_ui.py            # Современный Flet интерфейс
 │   ├── speech_recognition.py # faster-whisper (НЕ openai-whisper)
 │   ├── vad.py                # Silero VAD + RMS fallback (torch опционален)
 │   ├── audio_capture.py      # WASAPI захват
@@ -42,8 +44,8 @@ AI_Meetings/
 ├── AI_Meetings.spec          # PyInstaller spec
 ├── build_venv/               # Чистый venv для PyInstaller (не в git)
 └── dist/                     # Артефакты сборки (не в git)
-    ├── AI_Meetings.exe       # PyInstaller bundle (~613 MB)
-    └── AI_Meetings_Setup.exe # InnoSetup инсталлятор (~687 MB)
+    ├── AI_Meetings.exe       # PyInstaller bundle
+    └── AI_Meetings_Setup.exe # InnoSetup инсталлятор
 ```
 
 ### Шаг 1: Создать чистый venv для сборки
@@ -52,7 +54,7 @@ AI_Meetings/
 python -m venv build_venv
 build_venv\Scripts\pip install faster-whisper numpy scipy sounddevice pyaudio `
     comtypes pycaw pydub openai python-dotenv requests pillow `
-    tiktoken numba llvmlite pyinstaller
+    tiktoken numba llvmlite pyinstaller flet
 ```
 
 **Важно:** НЕ устанавливать torch, tensorflow, keras, transformers в build_venv.

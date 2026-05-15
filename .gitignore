@@ -89,6 +89,13 @@ htmlcov/
 test_recording_*.wav
 debug_recording_*.wav
 
+# Артефакты локальной разработки
+crash_log.txt
+*.spec
+build_venv/
+test_venv/
+minimal_install.bat
+
 # Сохранённые разговоры и саммари (генерируются пользователем)
 conversation_*.json
 summary_*.json

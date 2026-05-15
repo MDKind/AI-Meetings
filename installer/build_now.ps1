@@ -4,7 +4,18 @@
 Set-Location $PSScriptRoot
 $ErrorActionPreference = "Stop"
 
-$IsccExe    = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+$IsccLocal = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+$IsccGlobal = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+
+if (Test-Path $IsccLocal) {
+    $IsccExe = $IsccLocal
+} elseif (Test-Path $IsccGlobal) {
+    $IsccExe = $IsccGlobal
+} else {
+    Write-Host "ERROR: Inno Setup 6 (ISCC.exe) not found." -ForegroundColor Red
+    exit 1
+}
+
 $RepoRoot   = Split-Path -Parent $PSScriptRoot
 $AssetsDir  = Join-Path $PSScriptRoot "assets"
 $BundledDir = Join-Path $PSScriptRoot "bundled\ffmpeg"
@@ -98,10 +109,11 @@ $IssContent = $IssContent.Replace('SetupIconFile=assets\',        "SetupIconFile
 $IssContent = $IssContent.Replace('WizardImageFile=assets\',      "WizardImageFile=$PSScriptRoot\assets\")
 $IssContent = $IssContent.Replace('WizardSmallImageFile=assets\', "WizardSmallImageFile=$PSScriptRoot\assets\")
 $IssContent = $IssContent.Replace('Source: "..\dist\',            "Source: `"$DistDir\")
+$IssContent = $IssContent.Replace('Source: "..\data\',            "Source: `"$RepoRoot\data\")
 $IssContent = $IssContent.Replace('Source: "bundled\',            "Source: `"$PSScriptRoot\bundled\")
 $IssContent = $IssContent.Replace('Source: "assets\',             "Source: `"$PSScriptRoot\assets\")
 
-Set-Content -Path $IssTmp -Value $IssContent -Encoding UTF8
+Set-Content -Path $IssTmp -Value $IssContent -Encoding Default
 
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 

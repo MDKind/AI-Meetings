@@ -32,13 +32,7 @@ class ChatGPTClient:
         if api_key is None:
             api_key = CHATGPT_SETTINGS.get('api_key') or os.getenv("OPENAI_API_KEY")
         if not api_key:
-            if base_url:
-                api_key = "local"
-            else:
-                raise ValueError(
-                    "Необходимо указать OPENAI_API_KEY (для OpenAI) "
-                    "или OPENAI_API_BASE (для LM Studio / Ollama) в файле .env."
-                )
+            api_key = "local" if base_url else ""
 
         self.base_url = base_url
         self.api_key = api_key
@@ -49,14 +43,14 @@ class ChatGPTClient:
 
         self._lmstudio_runtime = _is_lmstudio_runtime(base_url)
 
-        if not self._lmstudio_runtime:
+        if not self._lmstudio_runtime and api_key:
             from openai import OpenAI
             client_kwargs = {'api_key': api_key}
             if base_url:
                 client_kwargs['base_url'] = base_url
             self.client = OpenAI(**client_kwargs)
         else:
-            self.client = None  # не используется в режиме LM Studio Runtime
+            self.client = None  # LM Studio Runtime или API не настроен
 
     # ── Низкоуровневые методы отправки ────────────────────────────────────────
 
@@ -177,13 +171,21 @@ class ChatGPTClient:
 
     def generate_meeting_summary(self):
         summary_prompt = """
-        Пожалуйста, создайте краткое саммари этой встречи, включающее:
-        1. Основные обсуждаемые темы
-        2. Ключевые решения и выводы
-        3. Вопросы, которые остались открытыми
-        4. Следующие шаги и назначенные задачи
+        Вы - профессиональный AI-ассистент для встреч (как Plaud Note). Проанализируйте транскрипт разговора и создайте подробный отчет в формате Markdown.
 
-        Формат: структурированное резюме в виде маркированных списков.
+        Структура отчета должна строго соответствовать следующим разделам:
+
+        ## 📝 Краткая выжимка (Summary)
+        (2-3 абзаца с основным смыслом разговора)
+
+        ## 🎯 Ключевые темы и решения (Key Topics & Decisions)
+        - (маркированный список основных обсужденных тем и принятых решений)
+        
+        ## ✅ Задачи (Action Items)
+        - [ ] Задачи с указанием ответственных, если они понятны из контекста
+        
+        ## 🧠 Интеллект-карта (Mind Map)
+        (Представьте структуру разговора в виде вложенных списков для удобного чтения)
         """
         messages = [{"role": "system", "content": self.system_prompt}]
         messages.extend(

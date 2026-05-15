@@ -1,17 +1,22 @@
 ; AI Meetings — InnoSetup 6 installer script
-; Packages the PyInstaller-compiled AI_Meetings.exe
+; Developer: Mikhail Depeshko
 ; Build: .\build_now.ps1  (from installer/ directory)
 ; Output: dist\AI_Meetings_Setup.exe
 
 #define AppName      "AI Meetings"
 #define AppVersion   "1.0"
-#define AppPublisher "AI Meetings"
+#define AppPublisher "Mikhail Depeshko"
+#define AppURL       "https://github.com/depeshko/ai-meetings"
+#define AppCopyright "Copyright (C) 2026 Mikhail Depeshko"
 
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
+AppPublisherURL={#AppURL}
+AppSupportURL={#AppURL}
+AppCopyright={#AppCopyright}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 AllowNoIcons=yes
@@ -32,10 +37,21 @@ WizardSmallImageFile=assets\icon_small.bmp
 DisableWelcomePage=no
 LicenseFile=..\LICENSE.txt
 ChangesEnvironment=yes
+VersionInfoVersion=1.0.0.0
+VersionInfoCompany={#AppPublisher}
+VersionInfoDescription={#AppName} Setup
+VersionInfoCopyright={#AppCopyright}
+VersionInfoProductName={#AppName}
+VersionInfoProductVersion=1.0.0.0
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+; ── CustomMessages: ASCII only to avoid encoding issues ──────────────────────
+[CustomMessages]
+RunAppLabel=Launch AI Meetings now
+russian.RunAppLabel=Launch AI Meetings now
 
 ; ── Files ──────────────────────────────────────────────────────────────────────
 
@@ -68,7 +84,7 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 [Run]
 ; Offer to launch after install
 Filename: "{app}\AI_Meetings.exe"; \
-  Description: "Launch {#AppName} now"; \
+  Description: "{cm:RunAppLabel}"; \
   Flags: nowait postinstall skipifsilent unchecked
 
 ; ── Pascal code ────────────────────────────────────────────────────────────────
@@ -89,8 +105,7 @@ begin
   Result := not ContainsPath(OldPath, NewPath);
 end;
 
-// ── Write empty .env template after install ───────────────────────────────────
-// API настраивается в самом приложении через поле "API Base URL"
+// ── Write .env template after install ────────────────────────────────────────
 
 procedure WriteEnvFile;
 var
@@ -99,11 +114,12 @@ begin
   ForceDirectories(ExpandConstant('{localappdata}\AI Meetings'));
   EnvPath := ExpandConstant('{localappdata}\AI Meetings\.env');
 
-  // Не перезаписываем если уже существует (повторная установка)
+  // Don't overwrite on reinstall
   if FileExists(EnvPath) then
     Exit;
 
   Content := '# AI Meetings configuration' + #13#10;
+  Content := Content + '# Developed by Mikhail Depeshko' + #13#10;
   Content := Content + '# Configure API via the app UI after launch' + #13#10 + #13#10;
   Content := Content + '# OpenAI cloud:' + #13#10;
   Content := Content + '# OPENAI_API_KEY=sk-proj-...' + #13#10 + #13#10;
@@ -120,4 +136,84 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
     WriteEnvFile;
+end;
+
+// ── Uninstall: remove {app} from user PATH ───────────────────────────────────
+
+procedure RemoveFromPath(AppPath: String);
+var
+  OldPath, NewPath, Remaining, Part: String;
+  SepPos: Integer;
+begin
+  if not RegQueryStringValue(HKCU, 'Environment', 'Path', OldPath) then
+    Exit;
+
+  // Walk OldPath splitting on ';', rebuild without AppPath entries
+  Remaining := OldPath;
+  NewPath := '';
+  repeat
+    SepPos := Pos(';', Remaining);
+    if SepPos > 0 then
+    begin
+      Part := Copy(Remaining, 1, SepPos - 1);
+      Remaining := Copy(Remaining, SepPos + 1, Length(Remaining));
+    end
+    else
+    begin
+      Part := Remaining;
+      Remaining := '';
+    end;
+
+    // Trim spaces and compare case-insensitively
+    while (Length(Part) > 0) and (Part[1] = ' ') do
+      Part := Copy(Part, 2, Length(Part));
+    while (Length(Part) > 0) and (Part[Length(Part)] = ' ') do
+      Part := Copy(Part, 1, Length(Part) - 1);
+
+    if (Part <> '') and (Lowercase(Part) <> Lowercase(AppPath)) then
+    begin
+      if NewPath <> '' then
+        NewPath := NewPath + ';';
+      NewPath := NewPath + Part;
+    end;
+  until Remaining = '';
+
+  RegWriteExpandStringValue(HKCU, 'Environment', 'Path', NewPath);
+end;
+
+// ── Uninstall: offer to remove user data ─────────────────────────────────────
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir, Msg: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    // Clean up PATH entry added during install
+    RemoveFromPath(ExpandConstant('{app}'));
+  end;
+
+  if CurUninstallStep = usPostUninstall then
+  begin
+    DataDir := ExpandConstant('{localappdata}\AI Meetings');
+    if DirExists(DataDir) then
+    begin
+      Msg := 'Remove user data (Whisper models, settings, .env)?' + #13#10 +
+             DataDir + #13#10#13#10 +
+             'Models can be re-downloaded on next launch.';
+      if MsgBox(Msg, mbConfirmation, MB_YESNO) = IDYES then
+        DelTree(DataDir, True, True, True);
+    end;
+  end;
+end;
+
+// ── Ready memo: show developer info ──────────────────────────────────────────
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo,
+  MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
+begin
+  Result := MemoDirInfo + NewLine + NewLine +
+            MemoGroupInfo + NewLine + NewLine +
+            'Developer: Mikhail Depeshko' + NewLine +
+            'Version: 1.0';
 end;
