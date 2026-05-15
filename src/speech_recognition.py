@@ -279,9 +279,43 @@ class FasterWhisperBackend:
         from faster_whisper import WhisperModel
         device, compute_type = _select_ct2_device()
         print(f"[FasterWhisper] Загрузка модели '{model_name}' (device={device}, compute={compute_type})...")
-        self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
+
+        # На Windows huggingface_hub создаёт symlinks, которые без Developer Mode
+        # превращаются в 0-байтные файлы. Скачиваем модель напрямую без symlinks.
+        model_path = self._ensure_model(model_name)
+        self.model = WhisperModel(model_path, device=device, compute_type=compute_type)
         self.language = language
         print("[FasterWhisper] Модель загружена!")
+
+    @staticmethod
+    def _ensure_model(model_name: str) -> str:
+        """Скачивает модель в локальную папку без symlinks и возвращает путь."""
+        local_dir = os.path.join(
+            os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
+            'AI Meetings', 'models', f'faster-whisper-{model_name}'
+        )
+        marker = os.path.join(local_dir, 'model.bin')
+
+        # Если модель уже скачана и файл не пустой — используем её
+        if os.path.exists(marker) and os.path.getsize(marker) > 0:
+            return local_dir
+
+        print(f"[FasterWhisper] Скачивание модели Systran/faster-whisper-{model_name} (без symlinks)...")
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=f"Systran/faster-whisper-{model_name}",
+            local_dir=local_dir,
+            local_dir_use_symlinks=False,
+        )
+
+        # Проверяем, что model.bin действительно скачался
+        if not os.path.exists(marker) or os.path.getsize(marker) == 0:
+            raise RuntimeError(
+                f"Не удалось скачать модель faster-whisper-{model_name}.\n"
+                "Проверьте подключение к интернету."
+            )
+
+        return local_dir
 
     def set_language(self, language: str):
         self.language = language
