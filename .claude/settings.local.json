@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(cmd /c \"venv\\\\Scripts\\\\python.exe -c \"\"import sys; print\\(sys.executable\\)\"\"\")",
-      "Bash(/i/Work/Dev/Repos/AI_Meetings/build_venv/Scripts/python.exe -c \"import numpy; print\\(''ok''\\)\")",
-      "Bash(build_venv/Scripts/python.exe -c \"import faster_whisper, pyaudiowpatch, sounddevice; print\\(''все зависимости есть''\\)\")"
-    ]
-  }
-}

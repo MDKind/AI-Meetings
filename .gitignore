@@ -93,7 +93,7 @@ debug_recording_*.wav
 build_venv/
 test_venv/
 
-.claude
+.claude/
 context.md
 
 # Сохранённые разговоры и саммари (генерируются пользователем)
