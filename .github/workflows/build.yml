@@ -34,10 +34,10 @@ jobs:
         PYTHONPATH: .
 
   # ── Job 2: Build WhisperService ─────────────────────────────────────────────
-  # .NET 8 publish — параллельно с тестами.
+  # .NET 10 publish — параллельно с тестами.
   # Артефакт передаётся в build-installer через upload/download artifact.
   build-whisper:
-    name: Build WhisperService (.NET 8)
+    name: Build WhisperService (.NET 10)
     runs-on: windows-latest
 
     steps:
@@ -81,11 +81,13 @@ jobs:
       with:
         python-version: '3.11'
         cache: 'pip'
-        cache-dependency-path: requirements.txt
+        cache-dependency-path: |
+          requirements.txt
+          requirements-build.txt
 
     - name: Install build dependencies
       run: |
-        pip install pyinstaller
+        pip install -r requirements-build.txt
         pip install -r requirements.txt
 
     - name: Download WhisperService artifact
