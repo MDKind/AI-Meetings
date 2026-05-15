@@ -302,11 +302,19 @@ class FasterWhisperBackend:
 
         print(f"[FasterWhisper] Скачивание модели Systran/faster-whisper-{model_name} (без symlinks)...")
         from huggingface_hub import snapshot_download
-        snapshot_download(
-            repo_id=f"Systran/faster-whisper-{model_name}",
-            local_dir=local_dir,
-            local_dir_use_symlinks=False,
-        )
+        try:
+            snapshot_download(
+                repo_id=f"Systran/faster-whisper-{model_name}",
+                local_dir=local_dir,
+                local_dir_use_symlinks=False,
+                # Отключаем прогресс-бар, так как в GUI (без консоли) sys.stderr может быть None
+                disable_tqdm=True 
+            )
+        except Exception as e:
+            # Если упало из-за записи в закрытый stdout/stderr или по сети
+            print(f"[FasterWhisper] Ошибка при скачивании: {e}")
+            if not os.path.exists(marker):
+                raise
 
         # Проверяем, что model.bin действительно скачался
         if not os.path.exists(marker) or os.path.getsize(marker) == 0:

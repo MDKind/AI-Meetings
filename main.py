@@ -10,6 +10,16 @@ from dotenv import load_dotenv
 # Добавляем текущую директорию в PATH для импорта модулей
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Исправление для PyInstaller --noconsole: перенаправляем вывод в никуда, 
+# чтобы print() не вызывал ошибку 'NoneType' object has no attribute 'write'
+if sys.stdout is None:
+    class DummyWriter:
+        def write(self, x): pass
+        def flush(self): pass
+    sys.stdout = DummyWriter()
+if sys.stderr is None:
+    sys.stderr = sys.stdout
+
 # Загружаем .env из %LOCALAPPDATA%\AI Meetings\.env
 # (туда же где temp-директория — доступно на запись даже при установке в Program Files)
 _env_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'AI Meetings')
