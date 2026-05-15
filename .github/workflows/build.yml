@@ -8,50 +8,101 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+
+  # ── Job 1: Tests ────────────────────────────────────────────────────────────
+  # Лёгкий job — не требует ML-библиотек и .NET.
+  # Запускается параллельно с build-whisper.
+  test:
+    name: Run tests
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v5
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
+        cache-dependency-path: requirements-test.txt
 
-    - name: Set up .NET 8
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'
-
-    - name: Build WhisperService
-      run: |
-        dotnet publish whisper_service/WhisperService.csproj -c Release -r win-x64 --self-contained true -o data/whisper_service
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install -r requirements.txt
+    - name: Install test dependencies
+      run: pip install -r requirements-test.txt
 
     - name: Run tests
-      run: |
-        pytest tests/ -v
+      run: python -m pytest tests/ -v
       env:
         PYTHONPATH: .
 
-    - name: Build PyInstaller executable
-      run: |
-        python -m PyInstaller AI_Meetings.spec --clean
+  # ── Job 2: Build WhisperService ─────────────────────────────────────────────
+  # .NET 8 publish — параллельно с тестами.
+  # Артефакт передаётся в build-installer через upload/download artifact.
+  build-whisper:
+    name: Build WhisperService (.NET 8)
+    runs-on: windows-latest
 
-    - name: Build Inno Setup Installer
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: nuget-${{ hashFiles('whisper_service/**/*.csproj') }}
+        restore-keys: nuget-
+
+    - name: Publish WhisperService
+      run: >
+        dotnet publish whisper_service/WhisperService.csproj
+        -c Release -r win-x64 --self-contained true
+        -o data/whisper_service
+
+    - name: Upload WhisperService artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: whisper-service-bin
+        path: data/whisper_service/
+        retention-days: 1
+
+  # ── Job 3: Build installer ──────────────────────────────────────────────────
+  # Запускается только если test и build-whisper прошли успешно.
+  build-installer:
+    name: Build installer
+    runs-on: windows-latest
+    needs: [ test, build-whisper ]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        cache-dependency-path: requirements.txt
+
+    - name: Install build dependencies
+      run: |
+        pip install pyinstaller
+        pip install -r requirements.txt
+
+    - name: Download WhisperService artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: whisper-service-bin
+        path: data/whisper_service/
+
+    - name: Build PyInstaller executable
+      run: python -m PyInstaller AI_Meetings.spec --clean
+
+    - name: Build Inno Setup installer
       run: |
         cd installer
         .\build_now.ps1
 
-    - name: Upload Installer Artifact
+    - name: Upload installer artifact
       uses: actions/upload-artifact@v4
       with:
         name: AI_Meetings_Installer
