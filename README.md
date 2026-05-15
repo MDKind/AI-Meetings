@@ -24,7 +24,7 @@
 
 - Windows 10/11 64-bit (WASAPI, Vulkan)
 - Python 3.11 (проверено; 3.13 тоже работает)
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — для сборки WhisperService
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — для сборки WhisperService
 - Inno Setup 6 (`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`)
 
 ### Структура
@@ -43,7 +43,7 @@ AI_Meetings/
 ├── utils/
 │   ├── config.py              # AUDIO_SETTINGS, SPEECH_RECOGNITION, CHATGPT_SETTINGS, UI_SETTINGS
 │   └── storage.py
-├── whisper_service/           # C# .NET 8 сервис транскрипции (whisper.net + Vulkan)
+├── whisper_service/           # C# .NET 10 сервис транскрипции (whisper.net + Vulkan)
 │   ├── WhisperService.csproj
 │   └── Program.cs             # Бинарный IPC протокол stdin/stdout с Python
 ├── tests/
@@ -72,7 +72,7 @@ build_venv\Scripts\pip install faster-whisper numpy sounddevice pyaudiowpatch `
 **Важно:** НЕ устанавливать torch, tensorflow, keras, transformers в build_venv.  
 faster-whisper использует CTranslate2 (не torch) — бандл получается компактнее.
 
-### Шаг 2: Собрать WhisperService (.NET 8)
+### Шаг 2: Собрать WhisperService (.NET 10)
 
 ```powershell
 dotnet publish whisper_service/WhisperService.csproj -c Release -r win-x64 --self-contained true -o data/whisper_service
