@@ -63,8 +63,6 @@ config_local.py
 # installer: игнорируем скачанные бинарники и готовый .exe, но не скрипты
 installer/bundled/ffmpeg/*.exe
 dist/*.exe
-# install_deps.log генерируется на машине пользователя
-install_deps.log
 
 # WhisperService: бинари публикуются в data/whisper_service, не в git
 data/whisper_service/
@@ -90,11 +88,12 @@ test_recording_*.wav
 debug_recording_*.wav
 
 # Артефакты локальной разработки
-crash_log.txt
+
 *.spec
 build_venv/
 test_venv/
-minimal_install.bat
+
+.claude
 
 # Сохранённые разговоры и саммари (генерируются пользователем)
 conversation_*.json
