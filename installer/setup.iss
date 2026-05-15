@@ -91,6 +91,47 @@ Filename: "{app}\AI_Meetings.exe"; \
 
 [Code]
 
+var
+  ModelPage: TInputOptionWizardPage;
+
+// ── Whisper model selection ───────────────────────────────────────────────────
+
+function GetSelectedModel: String;
+begin
+  case ModelPage.SelectedValueIndex of
+    0: Result := 'tiny';
+    1: Result := 'base';
+    2: Result := 'small';
+    3: Result := 'medium';
+    4: Result := 'large-v3-turbo';
+    5: Result := 'large-v3';
+  else
+    Result := 'base';
+  end;
+end;
+
+procedure InitializeWizard;
+begin
+  ModelPage := CreateInputOptionPage(
+    wpSelectProgramGroup,
+    'Whisper Speech Recognition Model',
+    'Choose which model to download on first launch',
+    'The selected model is downloaded automatically when the app first starts.' +
+    #13#10 + 'Larger models are more accurate but require more disk space and time.',
+    True,   { True = radio buttons (exclusive) }
+    False   { False = list style }
+  );
+  ModelPage.Add('tiny           ~75 MB   | fast, lower accuracy');
+  ModelPage.Add('base          ~142 MB   | good for short phrases  [recommended]');
+  ModelPage.Add('small         ~466 MB   | good quality');
+  ModelPage.Add('medium         ~1.5 GB  | high quality');
+  ModelPage.Add('large-v3-turbo ~1.6 GB  | very high quality, faster than large');
+  ModelPage.Add('large-v3       ~3.1 GB  | maximum quality');
+  ModelPage.SelectedValueIndex := 1;  { default: base }
+end;
+
+// ── PATH helpers ──────────────────────────────────────────────────────────────
+
 function ContainsPath(Existing, NewPath: String): Boolean;
 begin
   Result := Pos(Lowercase(NewPath), Lowercase(Existing)) > 0;
@@ -114,7 +155,8 @@ begin
   ForceDirectories(ExpandConstant('{localappdata}\AI Meetings'));
   EnvPath := ExpandConstant('{localappdata}\AI Meetings\.env');
 
-  // Don't overwrite on reinstall
+  // Don't overwrite on reinstall — user settings (API keys etc.) are preserved.
+  // To change the Whisper model after reinstall, use the app Settings panel.
   if FileExists(EnvPath) then
     Exit;
 
@@ -126,7 +168,7 @@ begin
   Content := Content + '# LM Studio (local):' + #13#10;
   Content := Content + '# OPENAI_API_BASE=http://127.0.0.1:1234/api/v1' + #13#10 + #13#10;
   Content := Content + '# CHATGPT_MODEL=' + #13#10;
-  Content := Content + '# WHISPER_MODEL=base' + #13#10;
+  Content := Content + 'WHISPER_MODEL=' + GetSelectedModel + #13#10;
   Content := Content + '# WHISPER_LANGUAGE=ru' + #13#10;
 
   SaveStringToFile(EnvPath, Content, False);
@@ -148,7 +190,6 @@ begin
   if not RegQueryStringValue(HKCU, 'Environment', 'Path', OldPath) then
     Exit;
 
-  // Walk OldPath splitting on ';', rebuild without AppPath entries
   Remaining := OldPath;
   NewPath := '';
   repeat
@@ -164,7 +205,6 @@ begin
       Remaining := '';
     end;
 
-    // Trim spaces and compare case-insensitively
     while (Length(Part) > 0) and (Part[1] = ' ') do
       Part := Copy(Part, 2, Length(Part));
     while (Length(Part) > 0) and (Part[Length(Part)] = ' ') do
@@ -188,10 +228,7 @@ var
   DataDir, Msg: String;
 begin
   if CurUninstallStep = usUninstall then
-  begin
-    // Clean up PATH entry added during install
     RemoveFromPath(ExpandConstant('{app}'));
-  end;
 
   if CurUninstallStep = usPostUninstall then
   begin
@@ -207,7 +244,7 @@ begin
   end;
 end;
 
-// ── Ready memo: show developer info ──────────────────────────────────────────
+// ── Ready memo ───────────────────────────────────────────────────────────────
 
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo,
   MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
@@ -215,5 +252,7 @@ begin
   Result := MemoDirInfo + NewLine + NewLine +
             MemoGroupInfo + NewLine + NewLine +
             'Developer: Mikhail Depeshko' + NewLine +
-            'Version: {#AppVersion}';
+            'Version: {#AppVersion}' + NewLine +
+            'Whisper model: ' + GetSelectedModel +
+            ' (downloaded on first launch)';
 end;

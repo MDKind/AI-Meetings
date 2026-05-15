@@ -2,6 +2,7 @@
 Основной файл для запуска приложения аудио-ассистента для встреч
 """
 import os
+import re
 import sys
 import tkinter as tk
 from tkinter import messagebox
@@ -29,6 +30,42 @@ _env_path = os.path.join(_env_dir, '.env')
 if not os.path.exists(_env_path):
     _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
 load_dotenv(_env_path)
+
+class _SplashWriter:
+    """Перехватывает stdout во время загрузки модели и обновляет splash progress bar.
+
+    _ggml_model_path печатает '\\r[WhisperNet] Скачивание: XX%' на каждый чанк.
+    Мы парсим процент и обновляем Canvas + вызываем root.update() чтобы окно не зависало.
+    """
+    _PCT_RE = re.compile(r'(\d+)%')
+
+    def __init__(self, root, canvas, label, orig=None):
+        self._root = root
+        self._canvas = canvas
+        self._label = label
+        self._orig = orig  # исходный stdout для pass-through (dev mode)
+
+    def write(self, text):
+        if self._orig:
+            self._orig.write(text)
+        m = self._PCT_RE.search(text)
+        if m and 'Скачив' in text:  # 'Скачив'
+            pct = int(m.group(1))
+            # Прогресс скачивания занимает диапазон 0.4–0.75 общей полосы
+            overall = 0.4 + (pct / 100.0) * 0.35
+            self._canvas.delete('progress')
+            self._canvas.create_rectangle(0, 0, 400 * overall, 20,
+                                          fill='#4CAF50', tags='progress')
+            self._label['text'] = f'Скачивание модели Whisper: {pct}%'
+            try:
+                self._root.update()
+            except Exception:
+                pass
+
+    def flush(self):
+        if self._orig:
+            self._orig.flush()
+
 
 def main():
     """
@@ -76,9 +113,14 @@ def main():
         audio_capture = AudioCapture()
         
         update_progress(0.4, "Загрузка модели распознавания речи...")
-        
+
         from src.speech_recognition import SpeechRecognizer
-        speech_recognizer = SpeechRecognizer()
+        _prev_stdout = sys.stdout
+        sys.stdout = _SplashWriter(root, progress_bar, progress, orig=_prev_stdout)
+        try:
+            speech_recognizer = SpeechRecognizer()
+        finally:
+            sys.stdout = _prev_stdout
         
         update_progress(0.6, "Инициализация клиента ChatGPT...")
         
