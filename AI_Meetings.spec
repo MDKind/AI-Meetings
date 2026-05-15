@@ -25,7 +25,7 @@ sd_datas = [(str(sd_dir), 'sounddevice')]
 # sv_ttk is no longer used, replaced by flet.
 sv_datas = []
 
-all_datas = ct2_datas + sd_datas + sv_datas
+all_datas = ct2_datas + sd_datas + sv_datas + [('version.txt', '.')]
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
 hidden_imports = [

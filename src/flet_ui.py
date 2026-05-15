@@ -22,8 +22,19 @@ class FletAudioAssistantUI:
 
         self.transcription_buffer = []
 
-        # Setup page
-        self.page.title = "AI Meetings"
+        def get_version():
+            import sys
+            try:
+                base_path = sys._MEIPASS
+            except Exception:
+                base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            try:
+                return open(os.path.join(base_path, 'version.txt')).read().strip()
+            except:
+                return "1.0.0"
+
+        self.version = get_version()
+        self.page.title = f"AI Meetings v{self.version}"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.window.width = 1000
         self.page.window.height = 700
@@ -207,7 +218,7 @@ class FletAudioAssistantUI:
     def setup_ui(self):
         # Top App Bar
         self.page.appbar = ft.AppBar(
-            title=ft.Text("AI Meetings", weight=ft.FontWeight.BOLD),
+            title=ft.Text(f"AI Meetings v{self.version}", weight=ft.FontWeight.BOLD),
             center_title=False,
             bgcolor=ft.colors.SURFACE_VARIANT,
             actions=[

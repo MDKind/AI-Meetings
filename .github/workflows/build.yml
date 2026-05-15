@@ -40,5 +40,5 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: AI_Meetings_Installer
-        path: dist/AI_Meetings_Setup.exe
+        path: dist/AI_Meetings_Setup_v*.exe
         retention-days: 7

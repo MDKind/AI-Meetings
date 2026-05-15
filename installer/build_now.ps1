@@ -102,6 +102,13 @@ $IssFile    = Join-Path $PSScriptRoot "setup.iss"
 $IssTmp     = Join-Path $env:TEMP "ai_meetings_setup.iss"
 $IssContent = Get-Content $IssFile -Raw
 
+$VersionFile = Join-Path $RepoRoot "version.txt"
+$AppVersion = "1.0.0"
+if (Test-Path $VersionFile) {
+    $AppVersion = (Get-Content $VersionFile).Trim()
+}
+$AppVersionDir = $AppVersion.Replace('.', '_')
+
 # Use .Replace() (literal, not regex) to avoid backslash escaping issues
 $IssContent = $IssContent.Replace('OutputDir=..\dist',            "OutputDir=$DistDir")
 $IssContent = $IssContent.Replace('LicenseFile=..\LICENSE.txt',   "LicenseFile=$RepoRoot\LICENSE.txt")
@@ -112,6 +119,12 @@ $IssContent = $IssContent.Replace('Source: "..\dist\',            "Source: `"$Di
 $IssContent = $IssContent.Replace('Source: "..\data\',            "Source: `"$RepoRoot\data\")
 $IssContent = $IssContent.Replace('Source: "bundled\',            "Source: `"$PSScriptRoot\bundled\")
 $IssContent = $IssContent.Replace('Source: "assets\',             "Source: `"$PSScriptRoot\assets\")
+
+# Dynamic Versioning
+$IssContent = $IssContent.Replace('#define AppVersion   "1.0"',           "#define AppVersion   `"$AppVersion`"")
+$IssContent = $IssContent.Replace('VersionInfoVersion=1.0.0.0',           "VersionInfoVersion=$AppVersion.0")
+$IssContent = $IssContent.Replace('VersionInfoProductVersion=1.0.0.0',    "VersionInfoProductVersion=$AppVersion.0")
+$IssContent = $IssContent.Replace('OutputBaseFilename=AI_Meetings_Setup', "OutputBaseFilename=AI_Meetings_Setup_v$AppVersion")
 
 Set-Content -Path $IssTmp -Value $IssContent -Encoding Default
 
@@ -124,7 +137,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$OutExe = Join-Path $DistDir "AI_Meetings_Setup.exe"
+$OutExe = Join-Path $DistDir "AI_Meetings_Setup_v$AppVersion.exe"
 if (Test-Path $OutExe) {
     $sz = [math]::Round((Get-Item $OutExe).Length / 1MB, 0)
     Write-Host ""
