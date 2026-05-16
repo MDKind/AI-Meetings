@@ -311,9 +311,15 @@ class FasterWhisperBackend:
                 local_dir=local_dir,
             )
         except Exception as e:
-            # Если упало из-за записи в закрытый stdout/stderr или по сети
             print(f"[FasterWhisper] Ошибка при скачивании: {e}")
             if not os.path.exists(marker):
+                err_str = str(e)
+                if '404' in err_str or 'Repository Not Found' in err_str or 'RepositoryNotFoundError' in type(e).__name__:
+                    raise RuntimeError(
+                        f"Модель 'faster-whisper-{model_name}' не найдена на HuggingFace.\n"
+                        f"Возможно, для этой модели нет CPU-бэкенда.\n"
+                        f"Выберите другую модель: tiny, base, small, medium или large-v3."
+                    ) from e
                 raise
         finally:
             if _prev_disable is None:
@@ -403,13 +409,23 @@ class SpeechRecognizer:
         self._ensure_temp_dir()
 
         # Пробуем WhisperNet (GPU)
+        _wn_err = None
         try:
             self._backend = WhisperNetBackend(model_name, language)
             print("[SpeechRecognizer] Backend: WhisperNet (Vulkan GPU)")
         except Exception as e:
+            _wn_err = e
             print(f"[SpeechRecognizer] WhisperNet недоступен: {e} — fallback на faster-whisper")
-            self._backend = FasterWhisperBackend(model_name, language)
-            print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
+            try:
+                self._backend = FasterWhisperBackend(model_name, language)
+                print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
+            except Exception as fw_err:
+                raise RuntimeError(
+                    f"Не удалось запустить распознавание речи.\n\n"
+                    f"WhisperNet: {_wn_err}\n\n"
+                    f"FasterWhisper: {fw_err}\n\n"
+                    f"Попробуйте выбрать другую модель (tiny или base) в боковой панели приложения."
+                ) from fw_err
 
     def set_model(self, model_name: str):
         """Меняет модель Whisper. Перезапускает backend с новой моделью."""
@@ -426,13 +442,23 @@ class SpeechRecognizer:
         self.model_name = model_name
         self._ensure_temp_dir()
         lang = language or SPEECH_RECOGNITION['default_language']
+        _wn_err = None
         try:
             self._backend = WhisperNetBackend(model_name, lang)
             print("[SpeechRecognizer] Backend: WhisperNet (Vulkan GPU)")
         except Exception as e:
+            _wn_err = e
             print(f"[SpeechRecognizer] WhisperNet недоступен: {e} — fallback на faster-whisper")
-            self._backend = FasterWhisperBackend(model_name, lang)
-            print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
+            try:
+                self._backend = FasterWhisperBackend(model_name, lang)
+                print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
+            except Exception as fw_err:
+                raise RuntimeError(
+                    f"Не удалось запустить распознавание речи.\n\n"
+                    f"WhisperNet: {_wn_err}\n\n"
+                    f"FasterWhisper: {fw_err}\n\n"
+                    f"Попробуйте выбрать другую модель (tiny или base) в боковой панели приложения."
+                ) from fw_err
 
     def _ensure_temp_dir(self):
         temp_dir = SPEECH_RECOGNITION['temp_dir']
