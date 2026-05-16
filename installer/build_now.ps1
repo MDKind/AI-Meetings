@@ -100,14 +100,13 @@ if (-not (Test-Path $LicFile)) {
 Write-Host "[4/4] Compiling installer..." -ForegroundColor Yellow
 $IssFile    = Join-Path $PSScriptRoot "setup.iss"
 $IssTmp     = Join-Path $env:TEMP "ai_meetings_setup.iss"
-$IssContent = Get-Content $IssFile -Raw
+$IssContent = Get-Content $IssFile -Raw -Encoding UTF8
 
 $VersionFile = Join-Path $RepoRoot "version.txt"
 $AppVersion = "1.0.0"
 if (Test-Path $VersionFile) {
     $AppVersion = (Get-Content $VersionFile).Trim()
 }
-$AppVersionDir = $AppVersion.Replace('.', '_')
 
 # Use .Replace() (literal, not regex) to avoid backslash escaping issues
 $IssContent = $IssContent.Replace('OutputDir=..\dist',            "OutputDir=$DistDir")
@@ -126,7 +125,7 @@ $IssContent = $IssContent.Replace('VersionInfoVersion=1.0.0.0',           "Versi
 $IssContent = $IssContent.Replace('VersionInfoProductVersion=1.0.0.0',    "VersionInfoProductVersion=$AppVersion.0")
 $IssContent = $IssContent.Replace('OutputBaseFilename=AI_Meetings_Setup', "OutputBaseFilename=AI_Meetings_Setup_v$AppVersion")
 
-Set-Content -Path $IssTmp -Value $IssContent -Encoding Default
+Set-Content -Path $IssTmp -Value $IssContent -Encoding UTF8
 
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 

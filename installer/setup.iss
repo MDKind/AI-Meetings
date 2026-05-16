@@ -48,10 +48,9 @@ VersionInfoProductVersion=1.0.0.0
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-; ── CustomMessages: ASCII only to avoid encoding issues ──────────────────────
 [CustomMessages]
 RunAppLabel=Launch AI Meetings now
-russian.RunAppLabel=Launch AI Meetings now
+russian.RunAppLabel=Запустить AI Meetings
 
 ; ── Files ──────────────────────────────────────────────────────────────────────
 
@@ -113,19 +112,19 @@ procedure InitializeWizard;
 begin
   ModelPage := CreateInputOptionPage(
     wpSelectProgramGroup,
-    'Whisper Speech Recognition Model',
-    'Choose which model to download on first launch',
-    'The selected model is downloaded automatically when the app first starts.' + #13#10 +
-    'Larger models are more accurate but require more disk space and time.',
+    'Модель распознавания речи Whisper',
+    'Выберите модель для загрузки при первом запуске',
+    'Выбранная модель загружается автоматически при первом старте приложения.' + #13#10 +
+    'Большие модели точнее, но требуют больше места на диске и времени загрузки.',
     True,   { True = radio buttons (exclusive) }
     False   { False = list style }
   );
-  ModelPage.Add('tiny           ~75 MB   | fast, lower accuracy');
-  ModelPage.Add('base          ~142 MB   | good for short phrases  [recommended]');
-  ModelPage.Add('small         ~466 MB   | good quality');
-  ModelPage.Add('medium         ~1.5 GB  | high quality');
-  ModelPage.Add('large-v3-turbo ~1.6 GB  | very high quality, faster than large');
-  ModelPage.Add('large-v3       ~3.1 GB  | maximum quality');
+  ModelPage.Add('tiny           ~75 MB   | быстро, точность ниже');
+  ModelPage.Add('base          ~142 MB   | хорошо для коротких фраз  [рекомендуется]');
+  ModelPage.Add('small         ~466 MB   | хорошее качество');
+  ModelPage.Add('medium         ~1.5 GB  | высокое качество');
+  ModelPage.Add('large-v3-turbo ~1.6 GB  | очень высокое качество, быстрее large');
+  ModelPage.Add('large-v3       ~3.1 GB  | максимальное качество');
   ModelPage.SelectedValueIndex := 1;  { default: base }
 end;
 
@@ -234,9 +233,9 @@ begin
     DataDir := ExpandConstant('{localappdata}\AI Meetings');
     if DirExists(DataDir) then
     begin
-      Msg := 'Remove user data (Whisper models, settings, .env)?' + #13#10 +
+      Msg := 'Удалить данные приложения (модели Whisper, настройки, .env)?' + #13#10 +
              DataDir + #13#10#13#10 +
-             'Models can be re-downloaded on next launch.';
+             'Модели будут загружены повторно при следующем запуске.';
       if MsgBox(Msg, mbConfirmation, MB_YESNO) = IDYES then
         DelTree(DataDir, True, True, True);
     end;
@@ -250,8 +249,8 @@ function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo,
 begin
   Result := MemoDirInfo + NewLine + NewLine +
             MemoGroupInfo + NewLine + NewLine +
-            'Developer: Mikhail Depeshko' + NewLine +
-            'Version: {#AppVersion}' + NewLine +
-            'Whisper model: ' + GetSelectedModel +
-            ' (downloaded on first launch)';
+            'Разработчик: Mikhail Depeshko' + NewLine +
+            'Версия: {#AppVersion}' + NewLine +
+            'Модель Whisper: ' + GetSelectedModel +
+            ' (загрузится при первом запуске)';
 end;
