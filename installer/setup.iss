@@ -116,8 +116,8 @@ begin
     wpSelectProgramGroup,
     'Whisper Speech Recognition Model',
     'Choose which model to download on first launch',
-    'The selected model is downloaded automatically when the app first starts.' +
-    #13#10 + 'Larger models are more accurate but require more disk space and time.',
+    'The selected model is downloaded automatically when the app first starts.' + #13#10 +
+    'Larger models are more accurate but require more disk space and time.',
     True,   { True = radio buttons (exclusive) }
     False   { False = list style }
   );
