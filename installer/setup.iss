@@ -128,6 +128,15 @@ begin
   ModelPage.SelectedValueIndex := 1;  { default: base }
 end;
 
+// ── Skip model page on upgrade (existing .env = user already has settings) ───
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if PageID = ModelPage.ID then
+    Result := FileExists(ExpandConstant('{localappdata}\AI Meetings\.env'));
+end;
+
 // ── PATH helpers ──────────────────────────────────────────────────────────────
 
 function ContainsPath(Existing, NewPath: String): Boolean;
