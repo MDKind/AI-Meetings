@@ -34,8 +34,20 @@ class FletAudioAssistantUI:
             except:
                 return "1.0.0"
 
+        def find_icon():
+            import sys
+            candidates = [
+                os.path.join(os.path.dirname(sys.executable), 'icon.ico'),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             'installer', 'assets', 'icon.ico'),
+            ]
+            return next((p for p in candidates if os.path.exists(p)), None)
+
         self.version = get_version()
         self.page.title = f"{UI_SETTINGS['window_title']} v{self.version}"
+        icon_path = find_icon()
+        if icon_path:
+            self.page.icon = icon_path
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.window.width = UI_SETTINGS['window_width']
         self.page.window.height = UI_SETTINGS['window_height']
