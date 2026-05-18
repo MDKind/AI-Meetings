@@ -21,11 +21,23 @@ import sounddevice as _sd
 sd_dir = Path(_sd.__file__).parent
 sd_datas = [(str(sd_dir), 'sounddevice')]
 
+# ── sherpa-onnx (speaker diarization — optional) ──────────────────────────────
+# collect_all pulls Python files, native DLLs and data from the sherpa_onnx package.
+# Wrapped in try/except so local builds without sherpa-onnx installed still work.
+try:
+    from PyInstaller.utils.hooks import collect_all
+    sherpa_datas, sherpa_binaries, sherpa_hiddenimports = collect_all('sherpa_onnx')
+except Exception:
+    sherpa_datas, sherpa_binaries, sherpa_hiddenimports = [], [], []
+
 # ── sv_ttk (Sun Valley theme — TCL files) ────────────────────────────────────
 # sv_ttk is no longer used, replaced by flet.
 sv_datas = []
 
-all_datas = ct2_datas + sd_datas + sv_datas + [('version.txt', '.')]
+all_datas = ct2_datas + sd_datas + sv_datas + sherpa_datas + [
+    ('version.txt', '.'),
+    ('installer/assets/icon.ico', '.'),
+]
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
 hidden_imports = [
@@ -50,12 +62,14 @@ hidden_imports = [
     'dotenv', 'numpy',
     # numba/llvmlite needed by some ctranslate2 builds
     'numba', 'llvmlite',
-]
+    # speaker diarization
+    'sherpa_onnx',
+] + sherpa_hiddenimports
 
 a = Analysis(
     ['main.py'],
     pathex=[str(project_root)],
-    binaries=[],
+    binaries=sherpa_binaries,
     datas=all_datas,
     hiddenimports=hidden_imports,
     hookspath=[],

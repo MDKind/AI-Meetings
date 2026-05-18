@@ -37,11 +37,15 @@ class FletAudioAssistantUI:
 
         def find_icon():
             import sys
-            candidates = [
-                os.path.join(os.path.dirname(sys.executable), 'icon.ico'),
-                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             'installer', 'assets', 'icon.ico'),
-            ]
+            candidates = []
+            # PyInstaller one-file bundle: files extracted to sys._MEIPASS
+            if hasattr(sys, '_MEIPASS'):
+                candidates.append(os.path.join(sys._MEIPASS, 'icon.ico'))
+            # Dev mode: source tree
+            candidates.append(os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'installer', 'assets', 'icon.ico',
+            ))
             return next((p for p in candidates if os.path.exists(p)), None)
 
         self.version = get_version()

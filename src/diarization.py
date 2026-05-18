@@ -1,8 +1,17 @@
 import os
+import sys
 import tarfile
 import urllib.request
 import numpy as np
 from typing import Callable, List, NamedTuple, Optional
+
+# In a PyInstaller one-file bundle all DLLs unpack to sys._MEIPASS.
+# Add it to the Windows DLL search path so sherpa-onnx finds onnxruntime and its own DLLs.
+if hasattr(sys, '_MEIPASS'):
+    try:
+        os.add_dll_directory(sys._MEIPASS)
+    except Exception:
+        pass
 
 _MODELS_DIR = os.path.join(
     os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
