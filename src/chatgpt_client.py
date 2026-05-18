@@ -153,12 +153,27 @@ class ChatGPTClient:
             return self._chat_lmstudio(messages, max_tokens)
         return self._chat_openai(messages, max_tokens)
 
+    _SPEAKER_LABEL = {"local": "Я", "remote": "Собеседник"}
+
+    def _history_as_messages(self):
+        """Конвертирует conversation_history в список messages для LLM.
+        Для сообщений с известным спикером добавляет префикс '[Я]: ' / '[Собеседник]: ',
+        чтобы LLM понимал кто что говорил при генерации саммари и ответов.
+        """
+        result = []
+        for m in self.conversation_history:
+            content = m["content"]
+            speaker = m.get("speaker", "unknown")
+            if speaker in self._SPEAKER_LABEL:
+                content = f"[{self._SPEAKER_LABEL[speaker]}]: {content}"
+            result.append({"role": m["role"], "content": content})
+        return result
+
     # ── Публичные методы ───────────────────────────────────────────────────────
 
     def add_message(self, content, role="user", speaker="unknown"):
         """
         speaker: "local" (mic), "remote" (system audio), "unknown"
-        Поле хранится в истории, но не отправляется в LLM.
         """
         self.conversation_history.append({
             "role": role,
@@ -174,10 +189,7 @@ class ChatGPTClient:
             self.add_message(prompt)
         try:
             messages = [{"role": "system", "content": self.system_prompt}]
-            messages.extend(
-                {"role": m["role"], "content": m["content"]}
-                for m in self.conversation_history
-            )
+            messages.extend(self._history_as_messages())
             response_text = self._send(messages)
             self.add_message(response_text, role="assistant")
             return response_text
@@ -204,10 +216,7 @@ class ChatGPTClient:
         (Представьте структуру разговора в виде вложенных списков для удобного чтения)
         """
         messages = [{"role": "system", "content": self.system_prompt}]
-        messages.extend(
-            {"role": m["role"], "content": m["content"]}
-            for m in self.conversation_history
-        )
+        messages.extend(self._history_as_messages())
         messages.append({"role": "user", "content": summary_prompt})
         try:
             return self._send(messages, max_tokens=2000)

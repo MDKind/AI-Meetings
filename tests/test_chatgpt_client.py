@@ -48,6 +48,44 @@ def test_generate_meeting_summary_contains_plaud_note_prompt(mock_settings):
     assert "## 📝 Краткая выжимка (Summary)" in summary_prompt
 
 
+class TestHistoryAsMessages:
+    def _client(self, mock_settings):
+        return ChatGPTClient(api_key='', base_url=None)
+
+    def test_local_speaker_gets_prefix(self, mock_settings):
+        c = self._client(mock_settings)
+        c.add_message("привет", role="user", speaker="local")
+        msgs = c._history_as_messages()
+        assert msgs[0]["content"] == "[Я]: привет"
+
+    def test_remote_speaker_gets_prefix(self, mock_settings):
+        c = self._client(mock_settings)
+        c.add_message("как дела", role="user", speaker="remote")
+        msgs = c._history_as_messages()
+        assert msgs[0]["content"] == "[Собеседник]: как дела"
+
+    def test_unknown_speaker_no_prefix(self, mock_settings):
+        c = self._client(mock_settings)
+        c.add_message("текст", role="user", speaker="unknown")
+        msgs = c._history_as_messages()
+        assert msgs[0]["content"] == "текст"
+
+    def test_assistant_role_no_prefix(self, mock_settings):
+        c = self._client(mock_settings)
+        c.add_message("ответ", role="assistant", speaker="unknown")
+        msgs = c._history_as_messages()
+        assert msgs[0]["content"] == "ответ"
+        assert msgs[0]["role"] == "assistant"
+
+    def test_mixed_speakers_order_preserved(self, mock_settings):
+        c = self._client(mock_settings)
+        c.add_message("вопрос", role="user", speaker="local")
+        c.add_message("ответ", role="user", speaker="remote")
+        msgs = c._history_as_messages()
+        assert msgs[0]["content"] == "[Я]: вопрос"
+        assert msgs[1]["content"] == "[Собеседник]: ответ"
+
+
 class TestReinitClient:
     def test_sets_none_without_api_key(self, mock_settings):
         c = ChatGPTClient(api_key='', base_url=None)
