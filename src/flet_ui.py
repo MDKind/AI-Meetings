@@ -22,6 +22,7 @@ class FletAudioAssistantUI:
         self.postprocess_enabled = False
 
         self.transcription_buffer = []
+        self._transcript_entries: list = []
 
         def get_version():
             import sys
@@ -99,6 +100,7 @@ class FletAudioAssistantUI:
             self.chatgpt_client.model = self.dd_llm.value
 
         try:
+            self._transcript_entries = []
             self.audio_capture.start_enhanced_recording(input_device_index=in_idx, output_device_index=out_idx)
             self.is_recording = True
             self.is_processing = True
@@ -131,6 +133,7 @@ class FletAudioAssistantUI:
         self.status_text.value = "Запись остановлена"
         self.pulse_ring.visible = False
         self.page.update()
+        self._try_diarize()
 
     def toggle_record(self, e):
         if self.is_recording:
@@ -159,10 +162,11 @@ class FletAudioAssistantUI:
                                 polished = True
                         except Exception:
                             pass
-                    self.append_transcription(transcription, speaker, polished=polished)
+                    self.append_transcription(transcription, speaker, polished=polished,
+                                              start_time=segment.get("start_time"))
             time.sleep(0.1)
 
-    def append_transcription(self, text, speaker, polished=False):
+    def append_transcription(self, text, speaker, polished=False, start_time=None):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         is_local = speaker == "local"
         speaker_name = "Я" if is_local else "Собеседник"
@@ -173,8 +177,20 @@ class FletAudioAssistantUI:
         if self.chatgpt_client:
             self.chatgpt_client.add_message(f"[{speaker_name}]: {text}", role="user")
 
+        start_offset = None
+        if is_local and start_time is not None and self.audio_capture and self.audio_capture.session_start:
+            start_offset = max(0.0, (start_time - self.audio_capture.session_start).total_seconds())
+
+        speaker_ctrl = ft.Text(speaker_name, color=color, size=12, weight=ft.FontWeight.BOLD)
+        self._transcript_entries.append({
+            "start_offset": start_offset,
+            "speaker_raw": speaker,
+            "speaker_ctrl": speaker_ctrl,
+        })
+
         header_row = ft.Row([
-            ft.Text(f"{speaker_name} • {ts}", color=color, size=12, weight=ft.FontWeight.BOLD),
+            speaker_ctrl,
+            ft.Text(f" • {ts}", color=ft.colors.GREY_500, size=12),
             *(
                 [ft.Icon(ft.icons.AUTO_AWESOME, size=12, color=ft.colors.AMBER_400,
                          tooltip="Улучшено LLM")]
@@ -220,11 +236,81 @@ class FletAudioAssistantUI:
 
     def clear_history(self, e):
         self.transcription_buffer = []
+        self._transcript_entries = []
         if self.chatgpt_client:
             self.chatgpt_client.clear_conversation()
         self.transcript_view.controls.clear()
         self.summary_text.value = ""
         self.status_text.value = "История очищена"
+        self.page.update()
+
+    def _try_diarize(self):
+        try:
+            from src import diarization as diar
+        except ImportError:
+            return
+        if not diar.is_available():
+            return
+        if not self.audio_capture:
+            return
+        pcm = self.audio_capture.session_pcm
+        if len(pcm) < 2 * 16000 * 2:
+            return
+        entries_snapshot = [e for e in self._transcript_entries if e["speaker_raw"] == "local"]
+        if not entries_snapshot:
+            return
+
+        def _run():
+            try:
+                def status_cb(msg):
+                    self.status_text.value = msg
+                    self.page.update()
+                status_cb("Диаризация...")
+                segments = diar.diarize(pcm, status_cb=status_cb)
+                self._apply_diarization(segments, entries_snapshot)
+            except Exception as e:
+                print(f"[Diarization] Ошибка: {e}")
+            finally:
+                self.status_text.value = "Запись остановлена"
+                self.page.update()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    _DIAR_COLORS = [
+        ft.colors.BLUE_400,
+        ft.colors.ORANGE_400,
+        ft.colors.PURPLE_400,
+        ft.colors.TEAL_400,
+    ]
+
+    def _apply_diarization(self, segments, entries):
+        speaker_map: dict = {}
+
+        for entry in entries:
+            offset = entry["start_offset"]
+            if offset is None:
+                continue
+            matched = next(
+                (s for s in segments if s.start <= offset < s.end),
+                None,
+            )
+            if matched is None and segments:
+                matched = min(segments, key=lambda s: abs((s.start + s.end) / 2 - offset))
+            if matched is None:
+                continue
+            sid = matched.speaker_id
+            if sid not in speaker_map:
+                n = len(speaker_map) + 1
+                speaker_map[sid] = (f"Участник {n}", self._DIAR_COLORS[(n - 1) % len(self._DIAR_COLORS)])
+            label, color = speaker_map[sid]
+            entry["speaker_ctrl"].value = label
+            entry["speaker_ctrl"].color = color
+
+        if len(speaker_map) <= 1:
+            for entry in entries:
+                entry["speaker_ctrl"].value = "Я"
+                entry["speaker_ctrl"].color = ft.colors.BLUE_400
+
         self.page.update()
 
     def show_snack(self, text, color):

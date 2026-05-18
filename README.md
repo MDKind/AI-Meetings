@@ -9,6 +9,7 @@
   - **WhisperNet** (primary): C# + whisper.net + Vulkan GPU — работает на любом GPU через DirectX
   - **faster-whisper** (fallback): CTranslate2, CPU int8 — 2-4× быстрее openai-whisper без GPU
 - Голосовая активация (Silero VAD / RMS fallback) — без ложных срабатываний на фон
+- **Диаризация спикеров** — разбивка транскрипта по участникам ("Участник 1/2/...") по окончании записи
 - Саммари встречи через OpenAI API или любой OpenAI-совместимый сервер (LM Studio, Ollama)
 - Современный UI на Flutter (Flet) с тёмной темой
 - Настройки API сохраняются в `.env` через UI-диалог
@@ -203,8 +204,25 @@ GGML `.bin` файлы (формат whisper.cpp) скачиваются из Hu
 В собранном бандле `torch` не включён → всегда используется RMS VAD.  
 Для разработки: `pip install torch --index-url https://download.pytorch.org/whl/cpu`
 
+## Диаризация спикеров
+
+После остановки записи (кнопка **Стоп**) приложение автоматически анализирует весь записанный звук с микрофона
+и расставляет метки по участникам встречи.
+
+Метки в транскрипте меняются с «Я» на «Участник 1», «Участник 2» и т.д. с цветовым выделением.
+Если обнаружен только один говорящий, метки остаются «Я».
+
+**Требования:** установленный пакет `sherpa-onnx` (`pip install sherpa-onnx`).  
+Без него функция недоступна, остальное приложение работает в обычном режиме.
+
+При первом использовании автоматически скачиваются модели (~15 МБ) в
+`%LOCALAPPDATA%\AI Meetings\models\diarization\`:
+- Segmentation model — [pyannote/segmentation-3.0](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-segmentation-models) (~6 МБ)
+- Embedding model — [3D-Speaker eres2net](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recognition-models) (~9 МБ)
+
 ## Известные ограничения
 
 - Windows only (WASAPI, Vulkan)
 - При первом запуске скачивается модель Whisper (~75–3100 MB в зависимости от размера)
 - Silero VAD недоступен в production-бандле (нет torch) — используется RMS VAD
+- Диаризация работает только с записью микрофона (не системный звук) и запускается постфактум

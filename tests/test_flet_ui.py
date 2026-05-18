@@ -3,6 +3,7 @@ import pytest
 import flet as ft
 from unittest.mock import MagicMock, patch
 from src.flet_ui import FletAudioAssistantUI
+from src.diarization import DiarSegment
 
 
 def _make_ui(tmp_path):
@@ -112,3 +113,86 @@ class TestSaveEnv:
         assert not hasattr(speech_mock, 'language') or \
                not speech_mock.method_calls or \
                all('language' not in str(c) for c in speech_mock.method_calls)
+
+
+# ── _apply_diarization ────────────────────────────────────────────────────────
+
+def _make_entry(offset, label="Я"):
+    ctrl = ft.Text(label, color=ft.colors.BLUE_400)
+    return {"start_offset": offset, "speaker_raw": "local", "speaker_ctrl": ctrl}
+
+
+class TestApplyDiarization:
+
+    def _ui(self, tmp_path):
+        return _make_ui(tmp_path)
+
+    def test_single_speaker_keeps_ya(self, tmp_path):
+        ui = self._ui(tmp_path)
+        entry = _make_entry(1.0)
+        segs = [DiarSegment(speaker_id=0, start=0.0, end=5.0)]
+        ui._apply_diarization(segs, [entry])
+        assert entry["speaker_ctrl"].value == "Я"
+        assert entry["speaker_ctrl"].color == ft.colors.BLUE_400
+
+    def test_two_speakers_get_participant_labels(self, tmp_path):
+        ui = self._ui(tmp_path)
+        e1 = _make_entry(1.0)
+        e2 = _make_entry(4.0)
+        segs = [
+            DiarSegment(speaker_id=0, start=0.0, end=3.0),
+            DiarSegment(speaker_id=1, start=3.0, end=6.0),
+        ]
+        ui._apply_diarization(segs, [e1, e2])
+        assert e1["speaker_ctrl"].value == "Участник 1"
+        assert e2["speaker_ctrl"].value == "Участник 2"
+        assert e1["speaker_ctrl"].color != e2["speaker_ctrl"].color
+
+    def test_same_speaker_two_entries_both_relabelled(self, tmp_path):
+        ui = self._ui(tmp_path)
+        e1 = _make_entry(0.5)
+        e2 = _make_entry(1.5)
+        segs = [DiarSegment(speaker_id=0, start=0.0, end=10.0),
+                DiarSegment(speaker_id=1, start=10.0, end=20.0)]
+        ui._apply_diarization(segs, [e1, e2])
+        # Both fall in speaker 0's segment → only 1 unique speaker → "Я"
+        assert e1["speaker_ctrl"].value == "Я"
+        assert e2["speaker_ctrl"].value == "Я"
+
+    def test_entry_with_none_offset_gets_ya_fallback(self, tmp_path):
+        ui = self._ui(tmp_path)
+        entry = _make_entry(None)
+        segs = [DiarSegment(speaker_id=0, start=0.0, end=5.0)]
+        ui._apply_diarization(segs, [entry])
+        # offset None → skipped → speaker_map empty → single-speaker path → "Я"
+        assert entry["speaker_ctrl"].value == "Я"
+
+    def test_empty_segments_reverts_to_ya(self, tmp_path):
+        ui = self._ui(tmp_path)
+        entry = _make_entry(2.0)
+        ui._apply_diarization([], [entry])
+        assert entry["speaker_ctrl"].value == "Я"
+
+    def test_fallback_to_closest_segment_when_no_overlap(self, tmp_path):
+        ui = self._ui(tmp_path)
+        e1 = _make_entry(0.1)
+        e2 = _make_entry(3.0)
+        segs = [
+            DiarSegment(speaker_id=0, start=0.5, end=1.5),
+            DiarSegment(speaker_id=1, start=2.0, end=4.0),
+        ]
+        ui._apply_diarization(segs, [e1, e2])
+        # e1 (0.1) has no overlap → closest midpoint: seg0 mid=1.0 dist=0.9, seg1 mid=3.0 dist=2.9
+        # → e1 maps to speaker 0
+        # e2 (3.0) overlaps seg1
+        # → 2 unique speakers
+        assert e1["speaker_ctrl"].value == "Участник 1"
+        assert e2["speaker_ctrl"].value == "Участник 2"
+
+    def test_four_speakers_cycle_colors(self, tmp_path):
+        ui = self._ui(tmp_path)
+        entries = [_make_entry(float(i)) for i in range(4)]
+        segs = [DiarSegment(speaker_id=i, start=float(i), end=float(i) + 1) for i in range(4)]
+        ui._apply_diarization(segs, entries)
+        colors = [e["speaker_ctrl"].color for e in entries]
+        assert len(set(colors)) == 4

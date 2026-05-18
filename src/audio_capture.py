@@ -63,6 +63,9 @@ class AudioCapture:
         self._sys_silent_chunks = 0
         self._sys_segment_start: datetime | None = None
 
+        self._session_pcm: bytearray = bytearray()
+        self._session_start: datetime | None = None
+
     @staticmethod
     def _get_wasapi_devices():
         """
@@ -284,6 +287,9 @@ class AudioCapture:
         if hasattr(self._vad, 'reset'):
             self._vad.reset()
 
+        self._session_pcm = bytearray()
+        self._session_start = datetime.now()
+
         try:
             # 1. Микрофон — напрямую через _process_audio_data (speaker="local")
             mic_stream = sd.InputStream(
@@ -345,6 +351,7 @@ class AudioCapture:
         while self.is_recording:
             try:
                 chunk = self._mic_raw_queue.get(timeout=0.2)
+                self._session_pcm.extend(chunk.flatten().tobytes())
                 self._process_audio_data(chunk, speaker="local")
             except Exception:
                 pass
@@ -441,6 +448,14 @@ class AudioCapture:
             print(f"[ERROR] Ошибка при захвате системного звука: {e}")
             traceback.print_exc()
     
+    @property
+    def session_pcm(self) -> bytes:
+        return bytes(self._session_pcm)
+
+    @property
+    def session_start(self):
+        return self._session_start
+
     def close(self):
         """
         Закрывает ресурсы записи
