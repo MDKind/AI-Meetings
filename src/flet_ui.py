@@ -178,23 +178,39 @@ class FletAudioAssistantUI:
 
         self.transcription_buffer.append({"text": text, "speaker": speaker_name})
 
+        msg_id = None
         if self.chatgpt_client:
-            self.chatgpt_client.add_message(f"[{speaker_name}]: {text}", role="user")
+            msg_id = self.chatgpt_client.add_message(f"[{speaker_name}]: {text}", role="user")
 
         start_offset = None
         if is_local and start_time is not None and self.audio_capture and self.audio_capture.session_start:
             start_offset = max(0.0, (start_time - self.audio_capture.session_start).total_seconds())
 
         speaker_ctrl = ft.Text(speaker_name, color=color, size=12, weight=ft.FontWeight.BOLD)
-        self._transcript_entries.append({
+
+        # Create entry early so button callbacks can capture it via default-arg binding
+        entry = {
             "start_offset": start_offset,
             "speaker_raw": speaker,
             "speaker_ctrl": speaker_ctrl,
-        })
+            "msg_id": msg_id,
+        }
+
+        edit_btn = ft.IconButton(
+            ft.icons.EDIT_OUTLINED, icon_size=14, icon_color=ft.colors.GREY_600,
+            tooltip="Редактировать",
+            on_click=lambda e, ent=entry: self._start_edit(ent),
+        )
+        llm_btn = ft.IconButton(
+            ft.icons.AUTO_AWESOME, icon_size=14, icon_color=ft.colors.GREY_600,
+            tooltip="Улучшить через LLM",
+            on_click=lambda e, ent=entry: self._llm_polish_entry(ent),
+        )
 
         header_row = ft.Row([
             speaker_ctrl,
             ft.Text(f" • {ts}", color=ft.colors.GREY_500, size=12),
+            ft.Row([edit_btn, llm_btn], spacing=0),
             *(
                 [ft.Icon(ft.icons.AUTO_AWESOME, size=12, color=ft.colors.AMBER_400,
                          tooltip="Улучшено LLM")]
@@ -202,8 +218,15 @@ class FletAudioAssistantUI:
             ),
         ], spacing=4)
 
+        text_ctrl = ft.Text(text, size=14)
+        content_col = ft.Column([header_row, text_ctrl], spacing=2)
+        entry["text_ctrl"] = text_ctrl
+        entry["col"] = content_col
+
+        self._transcript_entries.append(entry)
+
         msg = ft.Container(
-            content=ft.Column([header_row, ft.Text(text, size=14)], spacing=2),
+            content=content_col,
             bgcolor=ft.colors.SURFACE_VARIANT,
             padding=10,
             border_radius=8,
@@ -316,6 +339,127 @@ class FletAudioAssistantUI:
                 entry["speaker_ctrl"].color = ft.colors.BLUE_400
 
         self.page.update()
+
+    # ── Редактирование транскрипта ────────────────────────────────────────────
+
+    def _start_edit(self, entry):
+        if entry.get("editing"):
+            return
+        old_text = entry["text_ctrl"].value
+        entry["old_text"] = old_text
+        entry["editing"] = True
+
+        tf = ft.TextField(
+            value=old_text, multiline=True, min_lines=1, max_lines=6,
+            dense=True, expand=True, border_color=ft.colors.BLUE_400, text_size=14,
+        )
+        entry["edit_field"] = tf
+
+        save_btn = ft.IconButton(
+            ft.icons.CHECK_ROUNDED, icon_size=18, icon_color=ft.colors.GREEN_400,
+            tooltip="Сохранить", on_click=lambda e: self._finish_edit(entry),
+        )
+        cancel_btn = ft.IconButton(
+            ft.icons.CLOSE_ROUNDED, icon_size=18, icon_color=ft.colors.RED_400,
+            tooltip="Отмена", on_click=lambda e: self._cancel_edit(entry),
+        )
+        entry["col"].controls[1] = ft.Row(
+            [tf, save_btn, cancel_btn], vertical_alignment=ft.CrossAxisAlignment.START
+        )
+        self.page.update()
+
+    def _finish_edit(self, entry):
+        new_text = (entry.get("edit_field") or ft.TextField()).value.strip()
+        if not new_text:
+            self._cancel_edit(entry)
+            return
+
+        old_text = entry.get("old_text", "")
+        entry["text_ctrl"].value = new_text
+        entry["col"].controls[1] = entry["text_ctrl"]
+        entry["editing"] = False
+
+        for item in self.transcription_buffer:
+            if item["text"] == old_text:
+                item["text"] = new_text
+                break
+
+        self._sync_history(entry, new_text)
+        self.page.update()
+
+    def _cancel_edit(self, entry):
+        entry["col"].controls[1] = entry["text_ctrl"]
+        entry["editing"] = False
+        self.page.update()
+
+    def _sync_history(self, entry, new_text):
+        if not self.chatgpt_client or entry.get("msg_id") is None:
+            return
+        new_content = f"[{entry['speaker_ctrl'].value}]: {new_text}"
+        for msg in self.chatgpt_client.conversation_history:
+            if msg.get("_id") == entry["msg_id"]:
+                msg["content"] = new_content
+                return
+
+    def _llm_polish_entry(self, entry):
+        if not self.chatgpt_client or entry.get("editing"):
+            return
+        original = entry["text_ctrl"].value
+
+        def _run():
+            try:
+                improved = self.chatgpt_client.polish_transcription(original)
+                if improved and improved.strip() != original.strip():
+                    entry["text_ctrl"].value = improved
+                    for item in self.transcription_buffer:
+                        if item["text"] == original:
+                            item["text"] = improved
+                            break
+                    self._sync_history(entry, improved)
+                    self.page.update()
+            except Exception as e:
+                print(f"[LLM] Ошибка улучшения сегмента: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _apply_global_correction(self):
+        instruction = self.tb_correction.value.strip()
+        if not instruction:
+            self.show_snack("Введите инструкцию", ft.colors.ORANGE_400)
+            return
+        if not self.chatgpt_client:
+            self.show_snack("LLM не подключён", ft.colors.ORANGE_400)
+            return
+
+        entries = [e for e in self._transcript_entries if not e.get("editing")]
+        if not entries:
+            self.show_snack("Нет записей для правки", ft.colors.ORANGE_400)
+            return
+
+        self.status_text.value = "Применяю правку..."
+        self.page.update()
+
+        def _run():
+            try:
+                for entry in entries:
+                    original = entry["text_ctrl"].value
+                    improved = self.chatgpt_client.correct_text(original, instruction)
+                    if improved and improved.strip() != original.strip():
+                        entry["text_ctrl"].value = improved
+                        for item in self.transcription_buffer:
+                            if item["text"] == original:
+                                item["text"] = improved
+                                break
+                        self._sync_history(entry, improved)
+                self.status_text.value = "Правка применена"
+                self.tb_correction.value = ""
+            except Exception as e:
+                self.show_snack(f"Ошибка: {e}", ft.colors.RED_400)
+                self.status_text.value = "Готов"
+            finally:
+                self.page.update()
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def show_snack(self, text, color):
         self.page.snack_bar = ft.SnackBar(ft.Text(text), bgcolor=color)
@@ -549,6 +693,12 @@ class FletAudioAssistantUI:
 
         # Main Content Area
         self.transcript_view = ft.ListView(expand=True, spacing=10, auto_scroll=True)
+        self.tb_correction = ft.TextField(
+            hint_text="Инструкция для LLM: замените 'GPT' на 'ChatGPT' во всём транскрипте...",
+            expand=True,
+            dense=True,
+            text_size=13,
+        )
         self.summary_text = ft.Markdown(selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB)
         self.pr_summary = ft.ProgressBar(visible=False, color=ft.colors.BLUE_400)
 
@@ -561,8 +711,19 @@ class FletAudioAssistantUI:
                     text="Транскрипт",
                     icon=ft.icons.FORUM_ROUNDED,
                     content=ft.Container(
-                        padding=20,
-                        content=self.transcript_view
+                        padding=ft.padding.only(left=20, right=20, top=20, bottom=8),
+                        content=ft.Column([
+                            self.transcript_view,
+                            ft.Divider(height=8),
+                            ft.Row([
+                                self.tb_correction,
+                                ft.IconButton(
+                                    ft.icons.AUTO_FIX_HIGH,
+                                    tooltip="Применить правку через LLM ко всему транскрипту",
+                                    on_click=lambda e: self._apply_global_correction(),
+                                ),
+                            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        ])
                     )
                 ),
                 ft.Tab(

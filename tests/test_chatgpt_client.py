@@ -187,3 +187,68 @@ class TestFetchAvailableModels:
             timeout=10,
         )
         assert models == ['override-model']
+
+
+class TestAddMessageId:
+    def test_returns_integer_id(self, mock_settings):
+        c = ChatGPTClient(api_key='', base_url=None)
+        msg_id = c.add_message('hello')
+        assert isinstance(msg_id, int)
+
+    def test_message_has_id_field(self, mock_settings):
+        c = ChatGPTClient(api_key='', base_url=None)
+        msg_id = c.add_message('hello')
+        assert c.conversation_history[-1]['_id'] == msg_id
+
+    def test_ids_are_unique(self, mock_settings):
+        c = ChatGPTClient(api_key='', base_url=None)
+        id1 = c.add_message('first')
+        id2 = c.add_message('second')
+        assert id1 != id2
+
+    def test_id_survives_history_trim(self, mock_settings):
+        c = ChatGPTClient(api_key='', base_url=None)
+        # Fill history to the limit
+        for i in range(ChatGPTClient.MAX_HISTORY_MESSAGES):
+            c.add_message(f'msg {i}')
+        last_id = c.add_message('overflow')  # triggers pop(0)
+        assert c.conversation_history[-1]['_id'] == last_id
+
+
+class TestCorrectText:
+    def _make_client(self, mock_settings):
+        c = ChatGPTClient.__new__(ChatGPTClient)
+        c.max_tokens = 2000
+        c._lmstudio_runtime = False
+        c.client = MagicMock()
+        c.base_url = None
+        return c
+
+    def test_returns_corrected_text(self, mock_settings):
+        c = self._make_client(mock_settings)
+        c._send = MagicMock(return_value='GPT-4')
+        result = c.correct_text('джи-пи-ти-4', 'замени транслитерацию на аббревиатуру')
+        assert result == 'GPT-4'
+        c._send.assert_called_once()
+
+    def test_instruction_and_text_in_prompt(self, mock_settings):
+        c = self._make_client(mock_settings)
+        c._send = MagicMock(return_value='fixed')
+        c.correct_text('some text', 'my instruction')
+        messages = c._send.call_args[0][0]
+        user_msg = messages[-1]['content']
+        assert 'my instruction' in user_msg
+        assert 'some text' in user_msg
+
+    def test_returns_original_on_send_error(self, mock_settings):
+        c = self._make_client(mock_settings)
+        c._send = MagicMock(side_effect=RuntimeError('conn error'))
+        result = c.correct_text('original', 'fix it')
+        assert result == 'original'
+
+    def test_skips_empty_text(self, mock_settings):
+        c = self._make_client(mock_settings)
+        c._send = MagicMock()
+        result = c.correct_text('   ', 'anything')
+        c._send.assert_not_called()
+        assert result == '   '

@@ -19,6 +19,7 @@ class ChatGPTClient:
     - LM Studio Runtime API — /api/v1/chat  (новые версии LM Studio)
     """
     MAX_HISTORY_MESSAGES = 50
+    _msg_counter = 0  # global monotonic ID for conversation history entries
 
     def __init__(self, api_key=None, model=CHATGPT_SETTINGS['default_model'],
                  max_tokens=CHATGPT_SETTINGS['max_tokens'],
@@ -174,15 +175,19 @@ class ChatGPTClient:
     def add_message(self, content, role="user", speaker="unknown"):
         """
         speaker: "local" (mic), "remote" (system audio), "unknown"
+        Returns the unique _id assigned to this message.
         """
+        ChatGPTClient._msg_counter += 1
         self.conversation_history.append({
             "role": role,
             "content": content,
             "timestamp": datetime.now().isoformat(),
             "speaker": speaker,
+            "_id": ChatGPTClient._msg_counter,
         })
         while len(self.conversation_history) > self.MAX_HISTORY_MESSAGES:
             self.conversation_history.pop(0)
+        return ChatGPTClient._msg_counter
 
     def get_response(self, prompt=None):
         if prompt:
@@ -244,6 +249,29 @@ class ChatGPTClient:
             return self._send(messages, max_tokens=min(len(text) * 2 + 100, 1000))
         except Exception as e:
             print(f"[ChatGPT] Ошибка улучшения транскрипта: {e}")
+            return text
+
+    def correct_text(self, text: str, instruction: str) -> str:
+        """Apply a custom user instruction to a text segment (e.g. fix specific terms)."""
+        if not text.strip():
+            return text
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Ты редактор текста. Применяй данную инструкцию к тексту. "
+                    "Верни только исправленный текст без пояснений и без кавычек."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Инструкция: {instruction}\n\nТекст: {text}",
+            },
+        ]
+        try:
+            return self._send(messages, max_tokens=min(len(text) * 3 + 200, 1000))
+        except Exception as e:
+            print(f"[ChatGPT] Ошибка правки текста: {e}")
             return text
 
     def fetch_available_models(self, base_url=None, api_key=None) -> list:
