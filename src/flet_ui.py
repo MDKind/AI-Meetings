@@ -6,6 +6,45 @@ import time
 
 from utils.config import UI_SETTINGS, CHATGPT_SETTINGS
 
+
+def _apply_win32_icon(icon_path: str, window_title: str) -> None:
+    """Override the Flutter window icon via Win32 WM_SETICON in a background thread.
+
+    Flet's Flutter binary has its own icon baked in; page.window.icon asks the
+    window_manager plugin to change it, but that can race with window creation.
+    This fallback polls for the HWND and forces the HICON directly.
+    """
+    import sys
+    if sys.platform != 'win32':
+        return
+
+    def _worker():
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x10
+            LR_DEFAULTSIZE = 0x40
+            WM_SETICON = 0x80
+
+            hicon = user32.LoadImageW(
+                0, icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE
+            )
+            if not hicon:
+                return
+            for _ in range(20):
+                time.sleep(0.3)
+                hwnd = user32.FindWindowW(None, window_title)
+                if hwnd:
+                    user32.SendMessageW(hwnd, WM_SETICON, 0, hicon)  # ICON_SMALL
+                    user32.SendMessageW(hwnd, WM_SETICON, 1, hicon)  # ICON_BIG
+                    return
+        except Exception as e:
+            print(f"[icon] Win32 fallback: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 class FletAudioAssistantUI:
     def __init__(self, page: ft.Page, audio_capture=None, speech_recognizer=None, 
                  chatgpt_client=None, realtime_assistant=None, env_path=None):
@@ -52,7 +91,8 @@ class FletAudioAssistantUI:
         self.page.title = f"{UI_SETTINGS['window_title']} v{self.version}"
         icon_path = find_icon()
         if icon_path:
-            self.page.icon = icon_path
+            self.page.window.icon = icon_path
+            _apply_win32_icon(icon_path, self.page.title)
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.window.width = UI_SETTINGS['window_width']
         self.page.window.height = UI_SETTINGS['window_height']

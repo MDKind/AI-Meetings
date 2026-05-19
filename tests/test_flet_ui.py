@@ -1,8 +1,9 @@
 import os
+import sys
 import pytest
 import flet as ft
-from unittest.mock import MagicMock, patch
-from src.flet_ui import FletAudioAssistantUI
+from unittest.mock import MagicMock, patch, call
+from src.flet_ui import FletAudioAssistantUI, _apply_win32_icon
 from src.diarization import DiarSegment
 
 
@@ -196,3 +197,68 @@ class TestApplyDiarization:
         ui._apply_diarization(segs, entries)
         colors = [e["speaker_ctrl"].color for e in entries]
         assert len(set(colors)) == 4
+
+
+class TestApplyWin32Icon:
+    def test_no_op_on_non_windows(self):
+        with patch.object(sys, 'platform', 'linux'):
+            # should return immediately without spawning anything
+            with patch('threading.Thread') as mock_thread:
+                _apply_win32_icon('/some/icon.ico', 'My App')
+                mock_thread.assert_not_called()
+
+    def test_spawns_daemon_thread_on_windows(self):
+        with patch.object(sys, 'platform', 'win32'):
+            with patch('threading.Thread') as mock_thread:
+                mock_thread.return_value = MagicMock()
+                _apply_win32_icon('/some/icon.ico', 'My App')
+                mock_thread.assert_called_once()
+                _, kwargs = mock_thread.call_args
+                assert kwargs.get('daemon') is True
+
+    def test_worker_sets_icon_when_window_found(self, tmp_path):
+        icon_file = tmp_path / 'test.ico'
+        icon_file.write_bytes(b'\x00' * 64)
+
+        captured_worker = {}
+
+        def capture_thread(target=None, daemon=False):
+            captured_worker['fn'] = target
+            m = MagicMock()
+            m.start = MagicMock()
+            return m
+
+        with patch.object(sys, 'platform', 'win32'):
+            with patch('threading.Thread', side_effect=capture_thread):
+                _apply_win32_icon(str(icon_file), 'Test Window')
+
+        assert 'fn' in captured_worker
+
+        mock_user32 = MagicMock()
+        mock_user32.LoadImageW.return_value = 0xDEAD
+        mock_user32.FindWindowW.return_value = 0x1234
+        with patch('ctypes.windll') as mock_windll, patch('time.sleep'):
+            mock_windll.user32 = mock_user32
+            captured_worker['fn']()
+
+        mock_user32.SendMessageW.assert_any_call(0x1234, 0x80, 0, 0xDEAD)
+        mock_user32.SendMessageW.assert_any_call(0x1234, 0x80, 1, 0xDEAD)
+
+    def test_worker_skips_send_when_icon_load_fails(self, tmp_path):
+        captured_worker = {}
+
+        def capture_thread(target=None, daemon=False):
+            captured_worker['fn'] = target
+            return MagicMock()
+
+        with patch.object(sys, 'platform', 'win32'):
+            with patch('threading.Thread', side_effect=capture_thread):
+                _apply_win32_icon('/missing.ico', 'Test Window')
+
+        mock_user32 = MagicMock()
+        mock_user32.LoadImageW.return_value = 0  # load failed
+        with patch('ctypes.windll') as mock_windll, patch('time.sleep'):
+            mock_windll.user32 = mock_user32
+            captured_worker['fn']()
+
+        mock_user32.SendMessageW.assert_not_called()
