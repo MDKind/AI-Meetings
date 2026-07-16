@@ -383,57 +383,123 @@ class FasterWhisperBackend:
 
 
 # ---------------------------------------------------------------------------
-# Remote Whisper backend — OpenAI-совместимый сервер транскрипции
+# Remote Whisper backend — удалённый сервер транскрипции
 # ---------------------------------------------------------------------------
 
+def _normalize_server_url(url: str) -> str:
+    """Приводит URL к виду http(s)://host[:port][/path] без завершающего '/'.
+
+    Пользователь может ввести '192.168.88.55:8082' — схему добавляем сами.
+    """
+    url = (url or '').strip().rstrip('/')
+    if url and not url.lower().startswith(('http://', 'https://')):
+        url = 'http://' + url
+    return url
+
+
+def _models_url_candidates(base: str) -> list:
+    """URL'ы списка моделей для проверки: с /v1 и без."""
+    if base.endswith('/v1'):
+        return [base + '/models']
+    return [base + '/v1/models', base + '/models']
+
+
 def fetch_remote_whisper_models(base_url: str, api_key: str = '') -> list:
-    """Возвращает список id моделей с OpenAI-совместимого сервера (GET /models)."""
+    """Возвращает список id моделей с удалённого Whisper-сервера.
+
+    Пробует OpenAI-совместимый GET /v1/models (и /models). Если сервер жив,
+    но списка моделей не отдаёт (native whisper.cpp) — возвращает [] без ошибки.
+    Бросает RuntimeError, только если сервер вообще недоступен.
+    """
     import requests
-    if not base_url:
+    base = _normalize_server_url(base_url)
+    if not base:
         return []
-    url = base_url.rstrip('/') + '/models'
     headers = {}
     if api_key and api_key != 'local':
         headers['Authorization'] = f'Bearer {api_key}'
-    resp = requests.get(url, headers=headers, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    items = data if isinstance(data, list) else data.get('data', [])
-    return [m.get('id', str(m)) if isinstance(m, dict) else str(m) for m in items]
+
+    last_err = None
+    got_response = False
+    for url in _models_url_candidates(base):
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+        except Exception as e:
+            last_err = e
+            continue
+        got_response = True
+        if resp.status_code != 200:
+            continue
+        data = resp.json()
+        items = data if isinstance(data, list) else data.get('data', [])
+        return [m.get('id', str(m)) if isinstance(m, dict) else str(m) for m in items]
+
+    if not got_response:
+        raise RuntimeError(f"Сервер недоступен: {base} ({last_err})")
+    return []  # сервер жив, но /models нет — например, native whisper.cpp
 
 
 class RemoteWhisperBackend:
     """
-    Клиент OpenAI-совместимого эндпоинта /audio/transcriptions.
+    Клиент удалённого Whisper-сервера. Поддерживает два API (автоопределение):
 
-    Работает с whisper-моделями, развёрнутыми на сервере:
-    LM Studio, speaches / faster-whisper-server, vLLM, whisper.cpp server,
-    а также облачный OpenAI Audio API.
+      'openai'     — OpenAI-совместимый POST .../v1/audio/transcriptions
+                     (LM Studio, speaches / faster-whisper-server, vLLM, OpenAI)
+      'whispercpp' — native whisper.cpp server, POST /inference
+                     (модель задаётся на сервере, параметр model игнорируется)
     """
 
     REQUEST_TIMEOUT = 120  # сек на транскрипцию одного сегмента
 
     def __init__(self, base_url: str, model: str, language: str, api_key: str = ''):
-        if not base_url:
+        self.base_url = _normalize_server_url(base_url)
+        if not self.base_url:
             raise ValueError("Не указан URL удалённого Whisper-сервера")
-        self.base_url = base_url.rstrip('/')
         self.model = model or 'whisper-1'
         self.language = language or ''
         self.api_key = api_key or ''
 
-        # Быстрая проверка доступности сервера, чтобы упасть сразу
-        # (и дать SpeechRecognizer шанс на fallback), а не на первом сегменте.
+        # Определяем тип API и проверяем доступность сервера — сразу,
+        # а не на первом сегменте записи.
+        self.api_style, self._transcribe_url = self._detect_api()
+        print(f"[RemoteWhisper] API: {self.api_style}, endpoint: {self._transcribe_url}")
+
+    def _detect_api(self):
+        """Возвращает (api_style, transcribe_url).
+
+        1. GET /v1/models (или /models) отвечает 200 → OpenAI-совместимый.
+        2. Сервер отвечает (любым статусом), но /models нет → native whisper.cpp.
+        3. Ответа нет вообще → RuntimeError.
+        """
         import requests
-        try:
-            requests.get(
-                self.base_url + '/models',
-                headers=self._headers(),
-                timeout=5,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Удалённый Whisper-сервер недоступен: {self.base_url} ({e})"
-            ) from e
+        last_err = None
+        got_response = False
+
+        for models_url in _models_url_candidates(self.base_url):
+            try:
+                resp = requests.get(models_url, headers=self._headers(), timeout=5)
+            except Exception as e:
+                last_err = e
+                continue
+            got_response = True
+            if resp.status_code == 200:
+                # .../v1/models → .../v1/audio/transcriptions
+                return 'openai', models_url[: -len('/models')] + '/audio/transcriptions'
+
+        if not got_response:
+            try:
+                requests.get(self.base_url + '/', timeout=5)
+                got_response = True
+            except Exception as e:
+                last_err = e
+
+        if got_response:
+            root = self.base_url[:-3] if self.base_url.endswith('/v1') else self.base_url
+            return 'whispercpp', root + '/inference'
+
+        raise RuntimeError(
+            f"Удалённый Whisper-сервер недоступен: {self.base_url} ({last_err})"
+        )
 
     def _headers(self) -> dict:
         if self.api_key and self.api_key != 'local':
@@ -445,14 +511,17 @@ class RemoteWhisperBackend:
 
     def transcribe(self, wav_bytes: bytes) -> str:
         import requests
-        url = self.base_url + '/audio/transcriptions'
         files = {'file': ('segment.wav', wav_bytes, 'audio/wav')}
-        data = {'model': self.model, 'response_format': 'json'}
+        if self.api_style == 'whispercpp':
+            # native whisper.cpp: модель загружена на сервере, model не передаётся
+            data = {'response_format': 'json', 'temperature': '0.0'}
+        else:
+            data = {'model': self.model, 'response_format': 'json'}
         if self.language:
             data['language'] = self.language
 
         resp = requests.post(
-            url, files=files, data=data,
+            self._transcribe_url, files=files, data=data,
             headers=self._headers(), timeout=self.REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
@@ -650,7 +719,8 @@ class SpeechRecognizer:
     def active_backend_name(self) -> str:
         """Человекочитаемое имя активного бэкенда для статуса в UI."""
         if isinstance(self._backend, RemoteWhisperBackend):
-            return f"Remote ({self._backend.base_url})"
+            style = 'whisper.cpp' if self._backend.api_style == 'whispercpp' else 'OpenAI API'
+            return f"Remote {style} ({self._backend.base_url})"
         if isinstance(self._backend, WhisperNetBackend):
             return "WhisperNet (GPU)"
         if isinstance(self._backend, FasterWhisperBackend):

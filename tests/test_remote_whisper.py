@@ -238,3 +238,90 @@ class TestLazyInitialization:
         assert sr.mode == "remote"
         assert sr.remote_base_url == "http://srv:8000/v1"
         assert sr.is_ready is False
+
+
+class TestRemoteApiDetection:
+    """Автоопределение типа сервера: OpenAI-совместимый или native whisper.cpp."""
+
+    def test_url_scheme_added_when_missing(self):
+        from src.speech_recognition import _normalize_server_url
+        assert _normalize_server_url("192.168.88.55:8082") == "http://192.168.88.55:8082"
+        assert _normalize_server_url("https://srv/v1/") == "https://srv/v1"
+        assert _normalize_server_url("") == ""
+
+    def test_native_whispercpp_detected_when_models_404(self):
+        """Сервер жив, /v1/models и /models отдают 404 → native whisper.cpp."""
+        from src.speech_recognition import RemoteWhisperBackend
+        with patch("requests.get", return_value=_resp({}, status=404)):
+            backend = RemoteWhisperBackend("192.168.88.55:8082", "whisper-1", "ru")
+        assert backend.api_style == "whispercpp"
+        assert backend._transcribe_url == "http://192.168.88.55:8082/inference"
+
+    def test_openai_style_detected_without_v1_suffix(self):
+        """Пользователь ввёл URL без /v1 — /v1/models найден автоматически."""
+        from src.speech_recognition import RemoteWhisperBackend
+
+        def route(url, **kwargs):
+            if url.endswith("/v1/models"):
+                return _resp({"data": []}, status=200)
+            return _resp({}, status=404)
+
+        with patch("requests.get", side_effect=route):
+            backend = RemoteWhisperBackend("http://srv:8000", "whisper-1", "ru")
+        assert backend.api_style == "openai"
+        assert backend._transcribe_url == "http://srv:8000/v1/audio/transcriptions"
+
+    def test_native_transcribe_posts_to_inference_without_model(self):
+        from src.speech_recognition import RemoteWhisperBackend
+        with patch("requests.get", return_value=_resp({}, status=404)):
+            backend = RemoteWhisperBackend("http://srv:8082", "ignored-model", "ru")
+
+        with patch("requests.post", return_value=_resp({"text": "привет"})) as mock_post:
+            text = backend.transcribe(b"RIFF")
+
+        assert text == "привет"
+        args, kwargs = mock_post.call_args
+        assert args[0] == "http://srv:8082/inference"
+        assert "model" not in kwargs["data"]
+        assert kwargs["data"]["language"] == "ru"
+        assert kwargs["data"]["response_format"] == "json"
+
+    def test_v1_suffix_stripped_for_native_inference(self):
+        """Если native-сервер указан с /v1 — /inference строится от корня."""
+        from src.speech_recognition import RemoteWhisperBackend
+        with patch("requests.get", return_value=_resp({}, status=404)):
+            backend = RemoteWhisperBackend("http://srv:8082/v1", "m", "ru")
+        assert backend._transcribe_url == "http://srv:8082/inference"
+
+    def test_unreachable_server_raises(self):
+        from src.speech_recognition import RemoteWhisperBackend
+        with patch("requests.get", side_effect=ConnectionError("refused")):
+            with pytest.raises(RuntimeError, match="недоступен"):
+                RemoteWhisperBackend("http://10.0.0.1:9", "m", "ru")
+
+    def test_fetch_models_returns_empty_for_native(self):
+        """Native whisper.cpp: сервер жив, /models 404 → [] без исключения."""
+        from src.speech_recognition import fetch_remote_whisper_models
+        with patch("requests.get", return_value=_resp({}, status=404)):
+            assert fetch_remote_whisper_models("192.168.88.55:8082") == []
+
+    def test_fetch_models_unreachable_raises(self):
+        from src.speech_recognition import fetch_remote_whisper_models
+        with patch("requests.get", side_effect=ConnectionError("refused")):
+            with pytest.raises(RuntimeError, match="недоступен"):
+                fetch_remote_whisper_models("http://10.0.0.1:9")
+
+    def test_fetch_models_tries_v1_prefix_first(self):
+        from src.speech_recognition import fetch_remote_whisper_models
+        calls = []
+
+        def route(url, **kwargs):
+            calls.append(url)
+            if url.endswith("/v1/models"):
+                return _resp({"data": [{"id": "large-v3"}]}, status=200)
+            return _resp({}, status=404)
+
+        with patch("requests.get", side_effect=route):
+            models = fetch_remote_whisper_models("http://srv:8000")
+        assert models == ["large-v3"]
+        assert calls[0] == "http://srv:8000/v1/models"

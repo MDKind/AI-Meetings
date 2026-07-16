@@ -741,7 +741,13 @@ class FletAudioAssistantUI:
                     self.page.update()
                     self.show_snack(f"Загружено {len(models)} моделей", _C_SUCCESS)
                 else:
-                    self.show_snack("Сервер не вернул список моделей", _C_ERROR)
+                    # Сервер жив, но /models не отдаёт — native whisper.cpp:
+                    # модель задаётся на самом сервере, поле можно не менять
+                    self.show_snack(
+                        "Сервер доступен (native whisper.cpp) — модель задаётся "
+                        "на сервере, поле «Модель» можно оставить как есть",
+                        _C_SUCCESS,
+                    )
             except Exception as ex:
                 self.show_snack(f"Ошибка загрузки моделей: {ex}", _C_ERROR)
 
@@ -862,7 +868,8 @@ class FletAudioAssistantUI:
         )
         self.tb_stt_url = ft.TextField(
             label="URL Whisper-сервера",
-            hint_text="http://127.0.0.1:1234/v1 (LM Studio) или http://server:8000/v1",
+            hint_text="http://host:1234/v1 (LM Studio) · host:8082 (whisper.cpp)",
+            helper_text="Тип API определяется автоматически: OpenAI-совместимый или native whisper.cpp",
             dense=True,
         )
         self.tb_stt_key = ft.TextField(label="API Key (если требуется)", password=True,

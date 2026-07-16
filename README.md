@@ -190,11 +190,20 @@ cd installer
 
 ### Remote Whisper (удалённый сервер)
 
-Любой OpenAI-совместимый эндпоинт `POST /v1/audio/transcriptions` (multipart WAV):
-LM Studio, [speaches](https://github.com/speaches-ai/speaches) / faster-whisper-server,
-vLLM, whisper.cpp server, облачный OpenAI Audio API.
-Кнопка 🔄 в настройках загружает список моделей с сервера (`GET /v1/models`).
-Если сервер недоступен при старте — автоматический fallback на локальные бэкенды.
+Достаточно указать URL сервера (схема `http://` подставится сама) — тип API
+определяется автоматически:
+
+- **OpenAI-совместимый** — `POST .../v1/audio/transcriptions` (multipart WAV):
+  LM Studio, [speaches](https://github.com/speaches-ai/speaches) / faster-whisper-server,
+  vLLM, облачный OpenAI Audio API. Обнаруживается по `GET /v1/models` → 200.
+- **Native whisper.cpp server** — `POST /inference`: сервер отвечает, но `/v1/models`
+  не отдаёт. Модель загружена на самом сервере, поле «Модель» игнорируется.
+  Пример: `192.168.88.55:8082`.
+
+Кнопка 🔄 в настройках загружает список моделей (для OpenAI-совместимых) или
+подтверждает доступность native-сервера. Ошибки (сервер недоступен/не настроен)
+показываются при старте записи — скрытой загрузки локальной модели не происходит,
+fallback на локальную срабатывает только если она уже скачана.
 
 ### WhisperNet (primary, GPU via Vulkan)
 
