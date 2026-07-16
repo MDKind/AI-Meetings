@@ -76,7 +76,13 @@ class TestMDeltaChat:
         # system prompt свёрнут в текст сообщения
         assert "Системный промпт" in kwargs["json"]["message"]
         assert "Привет" in kwargs["json"]["message"]
-        assert kwargs["json"]["userId"] == "mdelta-meetings-user1"
+        # MDelta требует UUID v4 в userId (validateAnonymousUser.js)
+        import re
+        uuid_v4 = re.compile(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+        assert uuid_v4.match(kwargs["json"]["userId"])
+        # userId детерминирован: тот же логин → тот же UUID (история сохраняется)
+        assert kwargs["json"]["userId"] == client._mdelta_user_id
 
     def test_relogin_on_401(self):
         client = _make_client()

@@ -27,6 +27,7 @@ class SystemAudioCapture:
         self._pyaudio_instance = None
         self._loopback_stream = None
         self._silence_stream = None   # output stream для keepalive
+        self._threads: list = []      # фоновые потоки этой сессии (для join)
 
     # ------------------------------------------------------------------
     # Public API
@@ -47,6 +48,7 @@ class SystemAudioCapture:
         """
         self.is_recording = True
         self.data_queue = Queue()
+        self._threads = []
 
         print("[SystemAudio] Запуск захвата системного звука...")
 
@@ -57,13 +59,31 @@ class SystemAudioCapture:
 
         print("[SystemAudio] Захват системного звука недоступен.")
         print("[SystemAudio] Включите Stereo Mix в настройках Windows или используйте VB-Cable.")
-        threading.Thread(target=self._generate_silence, daemon=True).start()
+        self._spawn(self._generate_silence)
+
+    def _spawn(self, target, *args):
+        """Запускает фоновый поток сессии и регистрирует его для join в stop."""
+        t = threading.Thread(target=target, args=args, daemon=True)
+        self._threads.append(t)
+        t.start()
+        return t
 
     def stop_recording(self):
         self.is_recording = False
-        # Даём читающему потоку время завершиться
-        time.sleep(0.2)
 
+        # 1. Дожидаемся фоновых потоков. Читающий поток неблокирующий
+        #    (get_read_available + короткий sleep), поэтому выходит быстро.
+        threads_done = True
+        for t in self._threads:
+            try:
+                t.join(timeout=2.0)
+                if t.is_alive():
+                    threads_done = False
+            except Exception:
+                pass
+        self._threads = []
+
+        # 2. Закрываем стримы
         for attr in ('_loopback_stream', '_silence_stream'):
             stream = getattr(self, attr, None)
             setattr(self, attr, None)
@@ -74,9 +94,19 @@ class SystemAudioCapture:
                 except Exception:
                     pass
 
-        # terminate() намеренно не вызываем — вызывает segfault если
-        # daemon-поток ещё держит ссылку на объекты PyAudio.
+        # 3. Освобождаем PyAudio. Без terminate() WASAPI-сессии копятся между
+        #    записями — на Bluetooth-гарнитурах вторая сессия может получать
+        #    тишину. terminate вызываем ТОЛЬКО когда все потоки гарантированно
+        #    завершились — иначе segfault в PortAudio.
+        p = self._pyaudio_instance
         self._pyaudio_instance = None
+        if p is not None and threads_done:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        elif p is not None:
+            print("[SystemAudio] Поток не завершился — PyAudio не освобождён (утечка вместо segfault)")
         print("[SystemAudio] Запись системного звука остановлена.")
 
     def get_audio_data(self):
@@ -130,11 +160,7 @@ class SystemAudioCapture:
                         output_device_index=silence_out_index,
                         frames_per_buffer=self.chunk_size,
                     )
-                    threading.Thread(
-                        target=self._write_silence,
-                        args=(ch,),
-                        daemon=True,
-                    ).start()
+                    self._spawn(self._write_silence, ch)
                     print(f"[SystemAudio] Silence keeper запущен (output index={silence_out_index})")
                 except Exception as e:
                     print(f"[SystemAudio] Silence keeper не запущен: {e}")
@@ -150,11 +176,7 @@ class SystemAudioCapture:
             )
             print(f"[SystemAudio] Capture stream открыт (rate={rate}, ch={ch})")
 
-            threading.Thread(
-                target=self._read_wasapi_loopback,
-                args=(rate, ch),
-                daemon=True,
-            ).start()
+            self._spawn(self._read_wasapi_loopback, rate, ch)
             return True
 
         except Exception as e:
@@ -260,13 +282,22 @@ class SystemAudioCapture:
             print(f"[SystemAudio] _write_silence завершён: {e}")
 
     def _read_wasapi_loopback(self, rate: int, channels: int):
-        """Читает данные из WASAPI loopback потока в blocking режиме."""
+        """Читает данные из WASAPI loopback потока.
+
+        Неблокирующий паттерн: перед read() проверяем get_read_available(),
+        иначе read() может висеть бесконечно (WASAPI без рендера не отдаёт
+        данные) — поток не завершится по is_recording и p.terminate()
+        уронит процесс (segfault).
+        """
         try:
             while self.is_recording:
                 stream = self._loopback_stream
                 if stream is None:
                     break
                 try:
+                    if stream.get_read_available() < self.chunk_size:
+                        time.sleep(0.01)
+                        continue
                     raw = stream.read(self.chunk_size, exception_on_overflow=False)
                 except Exception as e:
                     if self.is_recording:
@@ -310,11 +341,7 @@ class SystemAudioCapture:
                     if (any(kw in name_lower for kw in keywords_en) or
                             any(kw in name_lower for kw in keywords_ru)):
                         print(f"[SystemAudio] Найден Stereo Mix: '{name}' (индекс {i})")
-                        threading.Thread(
-                            target=self._record_with_sounddevice,
-                            args=(i,),
-                            daemon=True,
-                        ).start()
+                        self._spawn(self._record_with_sounddevice, i)
                         return True
         except Exception as e:
             print(f"[SystemAudio] Ошибка поиска Stereo Mix: {e}")

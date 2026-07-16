@@ -111,16 +111,31 @@ class ChatGPTClient:
 
     @property
     def _mdelta_user_id(self) -> str:
-        """Стабильный userId для скоупинга диалога в MDelta."""
-        return f"mdelta-meetings-{self.mdelta_username or 'user'}"
+        """Стабильный userId для скоупинга диалога в MDelta.
+
+        MDelta валидирует userId как UUID v4 (validateAnonymousUser.js),
+        поэтому детерминированно строим UUID из имени пользователя:
+        один и тот же логин → один и тот же userId → история/память сохраняются.
+        """
+        import hashlib
+        import uuid
+        seed = f"mdelta-meetings:{self.mdelta_username or 'user'}"
+        raw = bytearray(hashlib.sha256(seed.encode('utf-8')).digest()[:16])
+        raw[6] = (raw[6] & 0x0F) | 0x40  # версия 4
+        raw[8] = (raw[8] & 0x3F) | 0x80  # вариант RFC 4122
+        return str(uuid.UUID(bytes=bytes(raw)))
+
+    # MDelta ограничивает message 32 000 символами (MAX_MESSAGE_LENGTH)
+    MDELTA_MAX_MESSAGE_CHARS = 30000
 
     def _chat_mdelta(self, messages, max_tokens):
         """
         Отправляет запрос через MDelta API (POST /api/chat).
 
-        MDelta принимает одно сообщение (message + userId), поэтому
+        MDelta принимает одно сообщение (message + userId-UUID), поэтому
         system prompt и история диалога сворачиваются в текст запроса.
         При 401 (протухший JWT) — один повторный логин.
+        Ответ: {success, response, chatSessionId, ...}.
         """
         system_msg = next((m['content'] for m in messages if m['role'] == 'system'), '')
         history = [m for m in messages if m['role'] != 'system']
@@ -135,6 +150,11 @@ class ChatGPTClient:
             text = "\n\n".join(parts)
         if system_msg:
             text = f"{system_msg}\n\n{text}"
+
+        # Лимит длины: обрезаем НАЧАЛО истории — конец транскрипта важнее
+        if len(text) > self.MDELTA_MAX_MESSAGE_CHARS:
+            text = "[...начало обрезано из-за лимита длины...]\n" + \
+                   text[-self.MDELTA_MAX_MESSAGE_CHARS:]
 
         if not self._mdelta_token:
             self._mdelta_login()

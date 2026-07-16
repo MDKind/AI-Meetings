@@ -66,6 +66,10 @@ class AudioCapture:
         self._session_pcm: bytearray = bytearray()
         self._session_start: datetime | None = None
 
+        # Номер сессии записи: фоновые потоки старой сессии сравнивают его со
+        # своим и завершаются, даже если is_recording снова True (быстрый рестарт)
+        self._session_gen = 0
+
     @staticmethod
     def _get_wasapi_devices():
         """
@@ -267,13 +271,24 @@ class AudioCapture:
         if self.is_recording:
             print("Запись уже идет")
             return
-            
+
+        self._session_gen += 1
+        gen = self._session_gen
         self.is_recording = True
         self.current_frames = []
         self.silent_chunks = 0
         self.speaking = False
         self._segment_start_time = None
         self.streams = []
+
+        # Сливаем «хвосты» прошлой сессии, чтобы старые сегменты/чанки
+        # не попали в новый транскрипт
+        for q in (self.frames_queue, self._mic_raw_queue):
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except Exception:
+                    break
 
         # Сбрасываем состояние mic и system аудио
         self._preroll.clear()
@@ -312,7 +327,7 @@ class AudioCapture:
             )
             threading.Thread(
                 target=self._capture_system_audio,
-                args=(output_device_index,),
+                args=(output_device_index, gen),
                 daemon=True,
             ).start()
             print("Захват системного звука запущен")
@@ -320,6 +335,7 @@ class AudioCapture:
             # Поток обработки mic (VAD + сегментация вне PortAudio callback)
             threading.Thread(
                 target=self._mic_processing_thread,
+                args=(gen,),
                 daemon=True,
             ).start()
 
@@ -346,9 +362,9 @@ class AudioCapture:
             print(f"Статус микрофона: {status}")
         self._mic_raw_queue.put((indata.copy() * 32767).astype(np.int16))
 
-    def _mic_processing_thread(self):
+    def _mic_processing_thread(self, gen: int):
         """Обрабатывает сырые mic-чанки в отдельном потоке (VAD, сегментация)."""
-        while self.is_recording:
+        while self.is_recording and gen == self._session_gen:
             try:
                 chunk = self._mic_raw_queue.get(timeout=0.2)
                 self._session_pcm.extend(chunk.flatten().tobytes())
@@ -409,18 +425,21 @@ class AudioCapture:
         self._sys_silent_chunks = 0
         self._sys_segment_start = None
 
-    def _capture_system_audio(self, device_index):
+    def _capture_system_audio(self, device_index, gen: int):
         """
         Функция для захвата системного звука в отдельном потоке.
         Использует изолированный VAD и сегментатор (нет race с mic-потоком).
         """
+        # Локальная ссылка: при рестарте self.system_capture заменяется новым
+        # объектом — старый поток должен работать только со своим
+        capture = self.system_capture
         try:
-            self.system_capture.start_recording(device_index)
+            capture.start_recording(device_index)
 
-            while self.is_recording:
+            while self.is_recording and gen == self._session_gen:
                 time.sleep(0.1)
 
-                audio_data = self.system_capture.get_audio_data()
+                audio_data = capture.get_audio_data()
                 if audio_data is None:
                     continue
 

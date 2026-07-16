@@ -432,3 +432,98 @@ class TestStartRecordingLazyPrepare:
         assert ui.speech_recognizer.ready_calls == 0
         ui.audio_capture.start_enhanced_recording.assert_called_once()
         assert ui.is_recording is True
+
+
+# ── Вёрстка и индикация удалённого STT ────────────────────────────────────────
+
+class TestDeviceDropdownLayout:
+
+    def test_long_device_names_truncated(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        long_name = "Микрофон гарнитуры (2- EPOS BTD 800 USB-C Bluetooth Hands-Free AG Audio)"
+        ui.audio_capture.list_input_devices.return_value = [(1, long_name, "microphone")]
+        ui.audio_capture.list_output_devices.return_value = [(5, long_name, "output")]
+
+        ui.refresh_devices()
+
+        opt = ui.dd_input.options[0]
+        assert opt.key == "1"
+        assert len(opt.text) <= FletAudioAssistantUI._DEVICE_LABEL_MAX
+        assert opt.text.endswith("…")
+        # value = только индекс — парсинг int(value.split(':')[0]) работает
+        assert ui.dd_input.value == "1"
+        assert int(ui.dd_input.value.split(":")[0]) == 1
+
+    def test_default_device_selected_by_key(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.audio_capture.list_input_devices.return_value = [
+            (0, "Другой микрофон", "microphone"),
+            (3, "Основной [по умолчанию]", "microphone"),
+        ]
+        ui.audio_capture.list_output_devices.return_value = []
+        ui.refresh_devices()
+        assert ui.dd_input.value == "3"
+
+    def test_settings_dialog_height_adapts(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.speech_recognizer = None
+        ui.chatgpt_client = None
+        ui.page.height = 1080
+        ui._open_settings()
+        assert ui._settings_col.height == 680  # min(680, 1080-200)
+
+        ui.page.height = 640
+        ui._open_settings()
+        assert ui._settings_col.height == 440  # 640-200
+
+
+class TestRemoteSttSidebarBadge:
+
+    def _rec(self, mode="remote", url="http://srv:8082", style="whispercpp"):
+        rec = MagicMock()
+        rec.mode = mode
+        rec.remote_base_url = url
+        rec.remote_model = "whisper-1"
+        rec._backend = MagicMock()
+        rec._backend.api_style = style
+        return rec
+
+    def test_remote_mode_shows_badge_hides_local_dropdown(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.speech_recognizer = self._rec()
+        ui._update_stt_ui_state()
+
+        assert ui.dd_whisper.visible is False
+        assert ui.remote_stt_badge.visible is True
+        assert "http://srv:8082" in ui.txt_remote_stt.value
+        assert "модель на сервере" in ui.txt_remote_stt.value
+
+    def test_openai_style_shows_model_name(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        rec = self._rec(style="openai")
+        rec.remote_model = "faster-whisper-large-v3"
+        ui.speech_recognizer = rec
+        ui._update_stt_ui_state()
+        assert "faster-whisper-large-v3" in ui.txt_remote_stt.value
+
+    def test_local_mode_shows_dropdown(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.speech_recognizer = self._rec(mode="local")
+        ui._update_stt_ui_state()
+        assert ui.dd_whisper.visible is True
+        assert ui.remote_stt_badge.visible is False
+
+    def test_native_pseudo_model_mapped_on_apply(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.speech_recognizer = None
+        ui.rg_stt.value = "remote"
+        ui.tb_stt_url.value = "http://srv:8082"
+        ui.dd_stt_model.options = [ft.dropdown.Option(FletAudioAssistantUI._NATIVE_MODEL_LABEL)]
+        ui.dd_stt_model.value = FletAudioAssistantUI._NATIVE_MODEL_LABEL
+        ui.dd_llm.value = "gpt-4o"
+
+        ui.apply_api_settings()
+
+        content = (tmp_path / ".env").read_text()
+        assert "WHISPER_REMOTE_MODEL=whisper-1" in content
+        assert "(модель" not in content

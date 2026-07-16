@@ -70,7 +70,11 @@ def _apply_win32_icon(icon_path: str, window_title: str) -> None:
 
 
 class FletAudioAssistantUI:
-    def __init__(self, page: ft.Page, audio_capture=None, speech_recognizer=None, 
+    # Отображается в дропдауне модели, когда native whisper.cpp сервер
+    # не отдаёт список моделей (модель задана на самом сервере)
+    _NATIVE_MODEL_LABEL = "(модель задаётся на сервере)"
+
+    def __init__(self, page: ft.Page, audio_capture=None, speech_recognizer=None,
                  chatgpt_client=None, realtime_assistant=None, env_path=None):
         self.page = page
         self.audio_capture = audio_capture
@@ -120,23 +124,35 @@ class FletAudioAssistantUI:
         self.setup_ui()
         self.refresh_devices()
 
+    # Максимум символов имени устройства в дропдауне — длинные имена
+    # (Bluetooth-гарнитуры) вылезают за границы контрола
+    _DEVICE_LABEL_MAX = 34
+
+    @classmethod
+    def _device_option(cls, idx, name):
+        """Option с key=индекс и усечённым текстом (полное имя — вне контрола)."""
+        label = f"{idx}: {name}"
+        if len(label) > cls._DEVICE_LABEL_MAX:
+            label = label[:cls._DEVICE_LABEL_MAX - 1] + "…"
+        return ft.dropdown.Option(key=str(idx), text=label)
+
     def refresh_devices(self, e=None):
         if not self.audio_capture: return
         input_devices = self.audio_capture.list_input_devices()
         output_devices = self.audio_capture.list_output_devices()
 
-        self.dd_input.options = [ft.dropdown.Option(f"{idx}: {name}") for idx, name, _ in input_devices]
-        self.dd_output.options = [ft.dropdown.Option(f"{idx}: {name}") for idx, name, _ in output_devices]
+        self.dd_input.options = [self._device_option(idx, name) for idx, name, _ in input_devices]
+        self.dd_output.options = [self._device_option(idx, name) for idx, name, _ in output_devices]
 
-        default_in = next((f"{idx}: {name}" for idx, name, _ in input_devices if "[по умолчанию]" in name), None)
-        default_out = next((f"{idx}: {name}" for idx, name, _ in output_devices if "[по умолчанию]" in name), None)
+        default_in = next((str(idx) for idx, name, _ in input_devices if "[по умолчанию]" in name), None)
+        default_out = next((str(idx) for idx, name, _ in output_devices if "[по умолчанию]" in name), None)
 
         if default_in: self.dd_input.value = default_in
-        elif input_devices: self.dd_input.value = f"{input_devices[0][0]}: {input_devices[0][1]}"
-        
+        elif input_devices: self.dd_input.value = str(input_devices[0][0])
+
         if default_out: self.dd_output.value = default_out
-        elif output_devices: self.dd_output.value = f"{output_devices[0][0]}: {output_devices[0][1]}"
-        
+        elif output_devices: self.dd_output.value = str(output_devices[0][0])
+
         self.page.update()
 
     def start_recording(self):
@@ -202,8 +218,31 @@ class FletAudioAssistantUI:
             self.pulse_ring.visible = True
             self.page.update()
 
+            # Watchdog: если через несколько секунд с микрофона не пришло
+            # ни байта — устройство молчит (выключена гарнитура и т.п.)
+            started_at = getattr(self.audio_capture, 'session_start', None)
+            watchdog = threading.Timer(5.0, self._check_audio_signal, args=(started_at,))
+            watchdog.daemon = True
+            watchdog.start()
+
         except Exception as e:
             self.show_snack(f"Ошибка записи: {e}", ft.colors.RED_400)
+
+    def _check_audio_signal(self, started_at):
+        """Проверка (по таймеру) что с микрофона реально идёт звук."""
+        if not self.is_recording or not self.audio_capture:
+            return
+        if getattr(self.audio_capture, 'session_start', None) is not started_at:
+            return  # уже другая сессия
+        pcm = getattr(self.audio_capture, 'session_pcm', b'')
+        if isinstance(pcm, (bytes, bytearray)) and len(pcm) == 0:
+            self.status_text.value = "⚠ Нет сигнала с микрофона"
+            self.show_snack(
+                "С микрофона не поступает звук. Проверьте, что устройство включено "
+                "(Bluetooth-гарнитура — активна), и обновите список устройств.",
+                ft.colors.ORANGE_400,
+            )
+            self.page.update()
 
     def stop_recording(self):
         if self.audio_capture:
@@ -228,27 +267,32 @@ class FletAudioAssistantUI:
 
     def process_audio(self):
         while self.is_processing:
-            segment = self.audio_capture.get_next_audio_segment()
-            if segment:
-                frames = segment.get("frames", segment) if isinstance(segment, dict) else segment
-                speaker = segment.get("speaker", "local") if isinstance(segment, dict) else "local"
-                
-                lang = self.dd_language.value
-                if lang == "auto": lang = None
-                
-                transcription = self.speech_recognizer.transcribe_audio_data(frames, language=lang)
-                if transcription:
-                    polished = False
-                    if self.postprocess_enabled and self.chatgpt_client:
-                        try:
-                            improved = self.chatgpt_client.polish_transcription(transcription)
-                            if improved and improved.strip() != transcription.strip():
-                                transcription = improved
-                                polished = True
-                        except Exception:
-                            pass
-                    self.append_transcription(transcription, speaker, polished=polished,
-                                              start_time=segment.get("start_time"))
+            # Любая ошибка одного сегмента не должна убивать поток обработки —
+            # иначе запись продолжается, а транскрипция молча умирает
+            try:
+                segment = self.audio_capture.get_next_audio_segment()
+                if segment:
+                    frames = segment.get("frames", segment) if isinstance(segment, dict) else segment
+                    speaker = segment.get("speaker", "local") if isinstance(segment, dict) else "local"
+
+                    lang = self.dd_language.value
+                    if lang == "auto": lang = None
+
+                    transcription = self.speech_recognizer.transcribe_audio_data(frames, language=lang)
+                    if transcription:
+                        polished = False
+                        if self.postprocess_enabled and self.chatgpt_client:
+                            try:
+                                improved = self.chatgpt_client.polish_transcription(transcription)
+                                if improved and improved.strip() != transcription.strip():
+                                    transcription = improved
+                                    polished = True
+                            except Exception:
+                                pass
+                        self.append_transcription(transcription, speaker, polished=polished,
+                                                  start_time=segment.get("start_time"))
+            except Exception as e:
+                print(f"[UI] Ошибка обработки сегмента: {e}")
             time.sleep(0.1)
 
     def append_transcription(self, text, speaker, polished=False, start_time=None):
@@ -575,6 +619,9 @@ class FletAudioAssistantUI:
         stt_url = self.tb_stt_url.value.strip()
         stt_key = self.tb_stt_key.value.strip()
         stt_model = self.dd_stt_model.value or 'whisper-1'
+        if stt_model == self._NATIVE_MODEL_LABEL:
+            # псевдо-значение для native whisper.cpp — сервер игнорирует model
+            stt_model = 'whisper-1'
         self._apply_stt_source(stt_mode, stt_url, stt_key, stt_model)
 
         if self.env_path:
@@ -630,10 +677,25 @@ class FletAudioAssistantUI:
         threading.Thread(target=_do, daemon=True).start()
 
     def _update_stt_ui_state(self):
-        """Локальный выбор модели Whisper в сайдбаре активен только в режиме local."""
-        remote = getattr(self.speech_recognizer, 'mode', 'local') == 'remote' \
-            if self.speech_recognizer else False
+        """Сайдбар отражает активный источник STT.
+
+        local  → дропдаун локальной модели;
+        remote → вместо него бейдж с адресом сервера и моделью.
+        """
+        rec = self.speech_recognizer
+        remote = getattr(rec, 'mode', 'local') == 'remote' if rec else False
+        self.dd_whisper.visible = not remote
         self.dd_whisper.disabled = remote
+        if hasattr(self, 'remote_stt_badge'):
+            self.remote_stt_badge.visible = remote
+            if remote:
+                url = getattr(rec, 'remote_base_url', '') or '—'
+                backend = getattr(rec, '_backend', None)
+                if backend is not None and getattr(backend, 'api_style', '') == 'whispercpp':
+                    model = 'модель на сервере'
+                else:
+                    model = getattr(rec, 'remote_model', '') or 'whisper-1'
+                self.txt_remote_stt.value = f"{url}\n{model}"
 
     def _save_env(self, api_key: str, base_url: str, model: str,
                   whisper_model: str = None, extra: dict = None):
@@ -702,6 +764,12 @@ class FletAudioAssistantUI:
         self.sw_postprocess.value = self.postprocess_enabled
         self._toggle_provider_fields()
         self._toggle_stt_fields()
+        # Высота диалога под окно: скролл появляется только когда реально
+        # не хватает места, а не на любом разрешении
+        page_h = getattr(self.page, 'height', None)
+        if not isinstance(page_h, (int, float)) or page_h <= 0:
+            page_h = 720
+        self._settings_col.height = max(360, min(680, int(page_h) - 200))
         self.settings_dlg.open = True
         self.page.update()
 
@@ -742,10 +810,12 @@ class FletAudioAssistantUI:
                     self.show_snack(f"Загружено {len(models)} моделей", _C_SUCCESS)
                 else:
                     # Сервер жив, но /models не отдаёт — native whisper.cpp:
-                    # модель задаётся на самом сервере, поле можно не менять
+                    # модель задаётся на самом сервере
+                    self._set_stt_model_options([self._NATIVE_MODEL_LABEL])
+                    self.dd_stt_model.value = self._NATIVE_MODEL_LABEL
+                    self.page.update()
                     self.show_snack(
-                        "Сервер доступен (native whisper.cpp) — модель задаётся "
-                        "на сервере, поле «Модель» можно оставить как есть",
+                        "Сервер доступен (native whisper.cpp) — модель задаётся на сервере",
                         _C_SUCCESS,
                     )
             except Exception as ex:
@@ -952,22 +1022,24 @@ class FletAudioAssistantUI:
             tooltip="Улучшать каждый фрагмент транскрипта через LLM: исправляет ошибки распознавания, пунктуацию, делает текст связным. Добавляет задержку на каждый фрагмент.",
         )
 
+        self._settings_col = ft.Column([
+            section_title("Распознавание речи (Whisper)"),
+            self.rg_stt,
+            self.remote_stt_fields,
+            ft.Divider(height=16),
+            section_title("Обработка и саммаризация (LLM)"),
+            self.rg_llm,
+            self.inference_fields,
+            self.mdelta_fields,
+            ft.Divider(height=16),
+            self.sw_postprocess,
+        ], tight=True, spacing=8, scroll=ft.ScrollMode.AUTO)
+
         self.settings_dlg = ft.AlertDialog(
             title=ft.Text("Настройки"),
             content=ft.Container(
                 width=460,
-                content=ft.Column([
-                    section_title("Распознавание речи (Whisper)"),
-                    self.rg_stt,
-                    self.remote_stt_fields,
-                    ft.Divider(height=16),
-                    section_title("Обработка и саммаризация (LLM)"),
-                    self.rg_llm,
-                    self.inference_fields,
-                    self.mdelta_fields,
-                    ft.Divider(height=16),
-                    self.sw_postprocess,
-                ], tight=True, spacing=8, scroll=ft.ScrollMode.AUTO, height=520),
+                content=self._settings_col,
             ),
             actions=[
                 ft.TextButton("Отмена", on_click=lambda e: [setattr(self.settings_dlg, 'open', False), self.page.update()]),
@@ -997,6 +1069,25 @@ class FletAudioAssistantUI:
             value=_cur_model,
             text_size=13,
             on_change=self._change_whisper_model,
+        )
+
+        # Бейдж активного удалённого Whisper-сервера (виден в remote-режиме
+        # вместо дропдауна локальной модели)
+        self.txt_remote_stt = ft.Text("", size=12, color=_C_TEXT, max_lines=3)
+        self.remote_stt_badge = ft.Container(
+            visible=False,
+            bgcolor='#E6F4FF',
+            border=ft.border.all(1, '#BAE0FF'),
+            border_radius=_RADIUS,
+            padding=10,
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.icons.CLOUD_OUTLINED, size=14, color=_C_PRIMARY),
+                    ft.Text("Удалённый Whisper", size=12,
+                            weight=ft.FontWeight.BOLD, color=_C_PRIMARY),
+                ], spacing=6),
+                self.txt_remote_stt,
+            ], spacing=4, tight=True),
         )
 
         self.btn_record = ft.ElevatedButton(
@@ -1031,6 +1122,7 @@ class FletAudioAssistantUI:
                 ft.Text("Распознавание", size=13, weight=ft.FontWeight.BOLD, color=_C_TEXT),
                 self.dd_language,
                 self.dd_whisper,
+                self.remote_stt_badge,
                 ft.Divider(height=20, color=_C_BORDER),
                 ft.Row([self.btn_record, self.pulse_ring], alignment=ft.MainAxisAlignment.START),
                 self.status_text,
