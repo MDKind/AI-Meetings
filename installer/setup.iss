@@ -103,6 +103,7 @@ begin
     3: Result := 'medium';
     4: Result := 'large-v3-turbo';
     5: Result := 'large-v3';
+    6: Result := 'skip';  { без локальной модели — удалённый Whisper-сервер }
   else
     Result := 'base';
   end;
@@ -113,9 +114,10 @@ begin
   ModelPage := CreateInputOptionPage(
     wpSelectProgramGroup,
     'Модель распознавания речи Whisper',
-    'Выберите модель для загрузки при первом запуске',
-    'Выбранная модель загружается автоматически при первом старте приложения.' + #13#10 +
-    'Большие модели точнее, но требуют больше места на диске и времени загрузки.',
+    'Выберите локальную модель — или пропустите загрузку',
+    'Модель загружается при первом запуске транскрипции (не при установке).' + #13#10 +
+    'Большие модели точнее, но требуют больше места на диске и времени загрузки.' + #13#10 +
+    'Источник распознавания можно сменить в любой момент в настройках приложения.',
     True,   { True = radio buttons (exclusive) }
     False   { False = list style }
   );
@@ -125,6 +127,7 @@ begin
   ModelPage.Add('medium         ~1.5 GB  | высокое качество');
   ModelPage.Add('large-v3-turbo ~1.6 GB  | очень высокое качество, быстрее large');
   ModelPage.Add('large-v3       ~3.1 GB  | максимальное качество');
+  ModelPage.Add('Не загружать локальную модель — использовать удалённый Whisper-сервер');
   ModelPage.SelectedValueIndex := 1;  { default: base }
 end;
 
@@ -182,7 +185,19 @@ begin
   Content := Content + '# LM Studio (local):' + #13#10;
   Content := Content + '# OPENAI_API_BASE=http://127.0.0.1:1234/api/v1' + #13#10 + #13#10;
   Content := Content + '# CHATGPT_MODEL=' + #13#10;
-  Content := Content + 'WHISPER_MODEL=' + GetSelectedModel + #13#10;
+  if GetSelectedModel = 'skip' then
+  begin
+    { Без локальной модели: удалённый Whisper-сервер, URL задаётся в настройках }
+    Content := Content + 'WHISPER_MODE=remote' + #13#10;
+    Content := Content + '# WHISPER_REMOTE_URL=http://127.0.0.1:1234/v1' + #13#10;
+    Content := Content + '# WHISPER_REMOTE_MODEL=whisper-1' + #13#10;
+    Content := Content + '# WHISPER_MODEL=base' + #13#10;
+  end
+  else
+  begin
+    Content := Content + 'WHISPER_MODE=local' + #13#10;
+    Content := Content + 'WHISPER_MODEL=' + GetSelectedModel + #13#10;
+  end;
   Content := Content + '# WHISPER_LANGUAGE=ru' + #13#10;
 
   SaveStringToFile(EnvPath, Content, False);
@@ -264,11 +279,17 @@ end;
 
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo,
   MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
+var
+  ModelInfo: String;
 begin
+  if GetSelectedModel = 'skip' then
+    ModelInfo := 'Модель Whisper: не загружать (удалённый сервер — настройка в приложении)'
+  else
+    ModelInfo := 'Модель Whisper: ' + GetSelectedModel +
+                 ' (загрузится при первой транскрипции)';
   Result := MemoDirInfo + NewLine + NewLine +
             MemoGroupInfo + NewLine + NewLine +
             'Разработчик: Mikhail Depeshko' + NewLine +
             'Версия: {#AppVersion}' + NewLine +
-            'Модель Whisper: ' + GetSelectedModel +
-            ' (загрузится при первом запуске)';
+            ModelInfo;
 end;

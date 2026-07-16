@@ -123,7 +123,9 @@ def main():
         from src.audio_capture import AudioCapture
         audio_capture = AudioCapture()
         
-        update_progress(0.4, "Загрузка модели распознавания речи...")
+        # Модель НЕ скачивается при старте: SpeechRecognizer инициализируется
+        # лениво (прогрев только если локальная модель уже на диске).
+        update_progress(0.4, "Инициализация распознавания речи...")
 
         from src.speech_recognition import SpeechRecognizer
         _prev_stdout = sys.stdout

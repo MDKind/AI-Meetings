@@ -360,3 +360,75 @@ class TestSettingsSections:
 
         assert "openai/gpt-oss-20b" in [o.key for o in ui.dd_llm.options]
         assert ui.dd_llm.value == "openai/gpt-oss-20b"
+
+
+# ── Ленивая подготовка распознавания при старте записи ───────────────────────
+
+class _ImmediateThread:
+    """Заменяет threading.Thread — выполняет target синхронно в start()."""
+    def __init__(self, target=None, daemon=None):
+        self._target = target
+
+    def start(self):
+        if self._target:
+            self._target()
+
+
+class _StubRecognizer:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.ready_calls = 0
+        self._ready = False
+        self.mode = "local"
+
+    @property
+    def is_ready(self):
+        return self._ready
+
+    def ensure_ready(self, status_cb=None):
+        self.ready_calls += 1
+        if self.fail:
+            raise RuntimeError("Удалённый Whisper-сервер недоступен")
+        self._ready = True
+
+
+class TestStartRecordingLazyPrepare:
+
+    def _ui(self, tmp_path, fail=False):
+        ui = _make_ui(tmp_path)
+        ui.speech_recognizer = _StubRecognizer(fail=fail)
+        ui.process_audio = lambda: None  # не крутить реальный цикл в тесте
+        ui.dd_input.value = "0: Микрофон"
+        ui.dd_output.value = "1: Динамики"
+        return ui
+
+    def test_prepares_source_then_starts_recording(self, tmp_path):
+        ui = self._ui(tmp_path)
+        with patch("src.flet_ui.threading.Thread", _ImmediateThread):
+            ui.start_recording()
+
+        assert ui.speech_recognizer.ready_calls == 1
+        ui.audio_capture.start_enhanced_recording.assert_called_once()
+        assert ui.is_recording is True
+        assert ui.btn_record.disabled is False
+
+    def test_prepare_failure_blocks_recording(self, tmp_path):
+        ui = self._ui(tmp_path, fail=True)
+        with patch("src.flet_ui.threading.Thread", _ImmediateThread):
+            ui.start_recording()
+
+        assert ui.speech_recognizer.ready_calls == 1
+        ui.audio_capture.start_enhanced_recording.assert_not_called()
+        assert ui.is_recording is False
+        assert ui.btn_record.disabled is False
+        assert ui.status_text.value == "Распознавание недоступно"
+
+    def test_ready_recognizer_starts_immediately(self, tmp_path):
+        ui = self._ui(tmp_path)
+        ui.speech_recognizer._ready = True
+        with patch("src.flet_ui.threading.Thread", _ImmediateThread):
+            ui.start_recording()
+
+        assert ui.speech_recognizer.ready_calls == 0
+        ui.audio_capture.start_enhanced_recording.assert_called_once()
+        assert ui.is_recording is True

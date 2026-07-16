@@ -104,15 +104,25 @@ class TestSpeechRecognizerSourceSelection:
         assert backend is mock_backend
         cls.assert_called_once_with("http://srv:8000/v1", "whisper-1", "ru", "")
 
-    def test_remote_failure_falls_back_to_local(self):
+    def test_remote_failure_falls_back_to_local_when_model_cached(self):
         sr = self._bare()
         sr.mode = "remote"
         sr.remote_base_url = "http://srv:8000/v1"
         local_backend = MagicMock()
         with patch("src.speech_recognition.RemoteWhisperBackend", side_effect=RuntimeError("down")):
-            with patch("src.speech_recognition.WhisperNetBackend", return_value=local_backend):
-                backend = sr._build_backend("base", "ru")
+            with patch.object(type(sr), "_local_model_cached", staticmethod(lambda m: True)):
+                with patch("src.speech_recognition.WhisperNetBackend", return_value=local_backend):
+                    backend = sr._build_backend("base", "ru")
         assert backend is local_backend
+
+    def test_remote_failure_without_cached_model_raises(self):
+        """Без скачанной локальной модели ошибка сервера не приводит к скрытой загрузке."""
+        sr = self._bare()
+        sr.mode = "remote"
+        sr.remote_base_url = "http://srv:8000/v1"
+        with patch("src.speech_recognition.RemoteWhisperBackend", side_effect=RuntimeError("down")):
+            with pytest.raises(RuntimeError, match="настройках"):
+                sr._build_backend("base", "ru")
 
     def test_configure_source_switches_to_remote(self):
         sr = self._bare()
@@ -145,3 +155,86 @@ class TestSpeechRecognizerSourceSelection:
         with patch("requests.get", return_value=_resp({"data": []})):
             sr._backend = RemoteWhisperBackend("http://srv:8000/v1", "m", "ru")
         assert "Remote" in sr.active_backend_name
+
+
+class TestLazyInitialization:
+    """Ленивая инициализация: модель не скачивается при старте приложения."""
+
+    def _bare(self):
+        from src.speech_recognition import SpeechRecognizer
+        import threading
+        sr = SpeechRecognizer.__new__(SpeechRecognizer)
+        sr.model_name = "base"
+        sr._backend = None
+        sr._backend_lock = threading.Lock()
+        return sr
+
+    def test_init_defers_when_local_model_not_cached(self, tmp_path):
+        from src.speech_recognition import SpeechRecognizer
+        with patch.object(SpeechRecognizer, "_build_backend") as mock_build:
+            sr = SpeechRecognizer(model_name="base")
+        mock_build.assert_not_called()
+        assert sr.is_ready is False
+
+    def test_init_preloads_when_local_model_cached(self, tmp_path):
+        from src.speech_recognition import SpeechRecognizer
+        ggml = tmp_path / "MDelta Meetings" / "models"
+        ggml.mkdir(parents=True)
+        (ggml / "ggml-base.bin").write_bytes(b"x" * 10)
+        backend = MagicMock()
+        with patch.object(SpeechRecognizer, "_build_backend", return_value=backend) as mock_build:
+            sr = SpeechRecognizer(model_name="base")
+        mock_build.assert_called_once()
+        assert sr.is_ready is True
+
+    def test_init_defers_in_remote_mode(self, tmp_path):
+        from src.speech_recognition import SpeechRecognizer
+        with patch.object(SpeechRecognizer, "_build_backend") as mock_build:
+            sr = SpeechRecognizer(model_name="base", mode="remote",
+                                  remote_base_url="http://srv:8000/v1")
+        mock_build.assert_not_called()
+        assert sr.is_ready is False
+
+    def test_ensure_ready_builds_backend_once(self):
+        sr = self._bare()
+        sr.mode = "local"
+        backend = MagicMock()
+        statuses = []
+        with patch.object(sr, "_build_backend", return_value=backend) as mock_build:
+            with patch.object(sr, "_ensure_temp_dir"):
+                sr.ensure_ready(status_cb=statuses.append)
+                sr.ensure_ready(status_cb=statuses.append)  # второй вызов — noop
+        mock_build.assert_called_once()
+        assert sr.is_ready is True
+        assert len(statuses) == 1 and "base" in statuses[0]
+
+    def test_ensure_ready_propagates_error(self):
+        sr = self._bare()
+        sr.mode = "remote"
+        sr.remote_base_url = ""
+        with patch.object(sr, "_build_backend", side_effect=RuntimeError("не настроен")):
+            with patch.object(sr, "_ensure_temp_dir"):
+                with pytest.raises(RuntimeError, match="не настроен"):
+                    sr.ensure_ready()
+        assert sr.is_ready is False
+
+    def test_set_model_deferred_does_not_build(self):
+        sr = self._bare()
+        with patch.object(sr, "_build_backend") as mock_build:
+            sr.set_model("large-v3")
+        mock_build.assert_not_called()
+        assert sr.model_name == "large-v3"
+        assert sr.is_ready is False
+
+    def test_configure_source_deferred_stores_without_building(self):
+        sr = self._bare()
+        sr.mode = "local"
+        sr.remote_base_url = ""
+        sr.remote_api_key = ""
+        sr.remote_model = "whisper-1"
+        with patch.object(sr, "_build_backend") as mock_build:
+            sr.configure_source("remote", "http://srv:8000/v1", "k", "m")
+        mock_build.assert_not_called()
+        assert sr.mode == "remote"
+        assert sr.remote_base_url == "http://srv:8000/v1"
+        assert sr.is_ready is False

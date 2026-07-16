@@ -473,8 +473,12 @@ class SpeechRecognizer:
     """
     Распознавание речи. Источник выбирается настройкой mode:
       'local'  — WhisperNet (Vulkan GPU), при недоступности faster-whisper (CPU)
-      'remote' — OpenAI-совместимый сервер (LM Studio, speaches, vLLM, OpenAI);
-                 при недоступности сервера — автоматический fallback на local.
+      'remote' — OpenAI-совместимый сервер (LM Studio, speaches, vLLM, OpenAI)
+
+    Инициализация ленивая: backend создаётся при первом запуске записи
+    (ensure_ready), а не при старте приложения. Модель НЕ скачивается,
+    пока пользователь не начал транскрипцию. Исключение — быстрый прогрев:
+    если выбран локальный режим и модель уже скачана, backend поднимается сразу.
     """
 
     NO_SPEECH_THRESHOLD = 0.6
@@ -487,7 +491,7 @@ class SpeechRecognizer:
 
     def __init__(self, model_name=SPEECH_RECOGNITION['default_model'],
                  mode=None, remote_base_url=None, remote_api_key=None,
-                 remote_model=None):
+                 remote_model=None, defer=None):
         self.model_name = model_name
         self.mode = mode if mode is not None else SPEECH_RECOGNITION.get('mode', 'local')
         self.remote_base_url = (remote_base_url if remote_base_url is not None
@@ -498,9 +502,48 @@ class SpeechRecognizer:
                              else SPEECH_RECOGNITION.get('remote_model', 'whisper-1'))
 
         self._backend = None
+        self._backend_lock = threading.Lock()
         self._ensure_temp_dir()
-        language = SPEECH_RECOGNITION['default_language']
-        self._backend = self._build_backend(model_name, language)
+
+        # defer=None → авто: прогреваем только если это «бесплатно»
+        # (локальный режим и модель уже на диске); иначе ждём первой записи.
+        if defer is None:
+            defer = not (self.mode == 'local' and self._local_model_cached(model_name))
+        if not defer:
+            language = SPEECH_RECOGNITION['default_language']
+            self._backend = self._build_backend(model_name, language)
+
+    @property
+    def is_ready(self) -> bool:
+        """True если backend инициализирован и готов к транскрипции."""
+        return self._backend is not None
+
+    def ensure_ready(self, status_cb=None):
+        """Инициализирует backend по требованию (перед первой записью).
+
+        status_cb(str) — опциональный колбэк для статуса в UI.
+        Бросает RuntimeError с понятным сообщением, если источник недоступен.
+        """
+        with self._backend_lock:
+            if self._backend is not None:
+                return
+            if status_cb:
+                if self.mode == 'remote':
+                    status_cb("Подключение к Whisper-серверу...")
+                else:
+                    status_cb(f"Загрузка модели Whisper ({self.model_name})...")
+            self._ensure_temp_dir()
+            language = SPEECH_RECOGNITION['default_language']
+            self._backend = self._build_backend(self.model_name, language)
+
+    @staticmethod
+    def _local_model_cached(model_name: str) -> bool:
+        """True если локальная модель уже скачана (GGML или faster-whisper)."""
+        models_dir = get_models_dir()
+        if os.path.exists(os.path.join(models_dir, f'ggml-{model_name}.bin')):
+            return True
+        marker = os.path.join(models_dir, f'faster-whisper-{model_name}', 'model.bin')
+        return os.path.exists(marker) and os.path.getsize(marker) > 0
 
     def _build_backend(self, model_name: str, language: str):
         """Создаёт backend согласно self.mode с цепочкой fallback'ов."""
@@ -513,7 +556,14 @@ class SpeechRecognizer:
                 print(f"[SpeechRecognizer] Backend: Remote Whisper ({self.remote_base_url})")
                 return backend
             except Exception as e:
-                print(f"[SpeechRecognizer] Remote Whisper недоступен: {e} — fallback на локальные бэкенды")
+                # Тихий fallback на локальную модель — только если она уже скачана.
+                # Иначе честная ошибка: не качаем гигабайты за спиной пользователя.
+                if not self._local_model_cached(model_name):
+                    raise RuntimeError(
+                        f"Удалённый Whisper-сервер недоступен или не настроен: {e}\n\n"
+                        f"Укажите URL сервера в настройках (⚙) или выберите локальную модель."
+                    ) from e
+                print(f"[SpeechRecognizer] Remote Whisper недоступен: {e} — fallback на локальную модель")
 
         _wn_err = None
         try:
@@ -544,10 +594,18 @@ class SpeechRecognizer:
         return ''
 
     def set_model(self, model_name: str):
-        """Меняет локальную модель Whisper. Перезапускает backend с новой моделью."""
+        """Меняет локальную модель Whisper.
+
+        Если backend ещё не инициализирован (отложенный запуск) — просто
+        запоминаем выбор, загрузка произойдёт при первой записи.
+        Если уже работает — перезапускаем с новой моделью сразу.
+        """
         if model_name == self.model_name:
             return
         print(f"[SpeechRecognizer] Смена модели: '{self.model_name}' → '{model_name}'")
+        if self._backend is None:
+            self.model_name = model_name
+            return
         language = self._current_language()
         self.close()
         self.model_name = model_name
@@ -557,11 +615,11 @@ class SpeechRecognizer:
 
     def configure_source(self, mode: str, remote_base_url: str = '',
                          remote_api_key: str = '', remote_model: str = ''):
-        """Переключает источник распознавания (local/remote) и пересоздаёт backend.
+        """Переключает источник распознавания (local/remote).
 
-        Вызывается из настроек UI. При mode='remote' и недоступном сервере
-        бросает исключение ТОЛЬКО если недоступны и локальные бэкенды —
-        иначе тихо переходит на локальный (принцип graceful degradation).
+        Вызывается из настроек UI. Backend пересоздаётся сразу только если
+        он уже был активен; в отложенном состоянии настройки просто
+        сохраняются — проверка источника произойдёт при старте записи.
         """
         mode = mode if mode in ('local', 'remote') else 'local'
         no_change = (
@@ -571,11 +629,11 @@ class SpeechRecognizer:
                 and remote_api_key == self.remote_api_key
                 and remote_model == self.remote_model
             ))
-            and self._backend is not None
         )
         if no_change:
             return
 
+        was_ready = self._backend is not None
         language = self._current_language()
         self.close()
         self.mode = mode
@@ -583,9 +641,10 @@ class SpeechRecognizer:
             self.remote_base_url = remote_base_url
             self.remote_api_key = remote_api_key
             self.remote_model = remote_model or 'whisper-1'
-        self._ensure_temp_dir()
-        lang = language or SPEECH_RECOGNITION['default_language']
-        self._backend = self._build_backend(self.model_name, lang)
+        if was_ready:
+            self._ensure_temp_dir()
+            lang = language or SPEECH_RECOGNITION['default_language']
+            self._backend = self._build_backend(self.model_name, lang)
 
     @property
     def active_backend_name(self) -> str:
@@ -632,6 +691,10 @@ class SpeechRecognizer:
                 if abs(gain - 1.0) > 0.05:  # применяем только если разница заметна
                     normalized = np.clip(samples.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
                     audio_data = normalized.tobytes()
+
+            # Страховка: при отложенной инициализации поднимаем backend здесь
+            if self._backend is None:
+                self.ensure_ready()
 
             # Передаём язык в backend перед транскрипцией
             effective_lang = language if language and language != 'auto' else None

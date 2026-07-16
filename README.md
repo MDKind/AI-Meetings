@@ -22,8 +22,14 @@
 
 ## Установка для конечного пользователя
 
-Запустите `dist\MDelta_Meetings_Setup_v*.exe` — мастер установит приложение и предложит ввести API-ключ.  
-При первом запуске приложение автоматически скачает модель Whisper (~75–150 MB) в `%LOCALAPPDATA%MDelta Meetings\models\`.
+Запустите `dist\MDelta_Meetings_Setup_v*.exe` — мастер установит приложение и предложит
+выбрать локальную модель Whisper **или пропустить загрузку** (вариант «Не загружать
+локальную модель» — для работы с удалённым Whisper-сервером).
+
+Модель **не скачивается ни при установке, ни при запуске приложения** — только при первом
+нажатии «Запись» (в `%LOCALAPPDATA%\MDelta Meetings\models\`). Если выбран удалённый
+источник, при старте записи проверяется доступность сервера; ошибка (сервер недоступен /
+не настроен) показывается в приложении и запись не начинается.
 
 ## Dev: сборка
 
@@ -142,7 +148,7 @@ cd installer
 
 ## Настройка (.env)
 
-При установке создаётся `%LOCALAPPDATA%MDelta Meetings\.env` (не перезаписывается при переустановке).  
+При установке создаётся `%LOCALAPPDATA%\MDelta Meetings\.env` (не перезаписывается при переустановке).  
 Для dev-запуска: скопируйте `.env.example` → `.env` в корне репозитория.
 
 Настройки также можно изменить через кнопку ⚙️ в приложении — они сохраняются в тот же `.env`.
@@ -205,13 +211,13 @@ Python запускает `WhisperService.exe` как subprocess и общает
 ### faster-whisper (fallback, CPU)
 
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2, int8-квантизация.  
-Работает без GPU. Модели скачиваются при первом запуске в `%LOCALAPPDATA%MDelta Meetings\models\faster-whisper-<name>\`.
+Работает без GPU. Модели скачиваются при первой транскрипции в `%LOCALAPPDATA%\MDelta Meetings\models\faster-whisper-<name>\`.
 
 Если доступна CUDA — используется GPU (float16). Логика выбора: `speech_recognition.py`, функция `_select_ct2_device()`.
 
 ### GGML-модели для WhisperNet
 
-GGML `.bin` файлы (формат whisper.cpp) скачиваются из HuggingFace в `%LOCALAPPDATA%MDelta Meetings\models\`:
+GGML `.bin` файлы (формат whisper.cpp) скачиваются из HuggingFace в `%LOCALAPPDATA%\MDelta Meetings\models\`:
 
 | Модель | Размер | Точность |
 |---|---|---|
@@ -253,13 +259,13 @@ GGML `.bin` файлы (формат whisper.cpp) скачиваются из Hu
 Без него функция недоступна, остальное приложение работает в обычном режиме.
 
 При первом использовании автоматически скачиваются модели (~15 МБ) в
-`%LOCALAPPDATA%MDelta Meetings\models\diarization\`:
+`%LOCALAPPDATA%\MDelta Meetings\models\diarization\`:
 - Segmentation model — [pyannote/segmentation-3.0](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-segmentation-models) (~6 МБ)
 - Embedding model — [3D-Speaker eres2net](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recognition-models) (~9 МБ)
 
 ## Известные ограничения
 
 - Windows only (WASAPI, Vulkan)
-- При первом запуске скачивается модель Whisper (~75–3100 MB в зависимости от размера)
+- При первой транскрипции скачивается модель Whisper (если выбран локальный источник) (~75–3100 MB в зависимости от размера)
 - Silero VAD недоступен в production-бандле (нет torch) — используется RMS VAD
 - Диаризация работает только с записью микрофона (не системный звук) и запускается постфактум

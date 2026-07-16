@@ -151,19 +151,45 @@ class FletAudioAssistantUI:
             self.show_snack("Ошибка выбора устройств", ft.colors.RED_400)
             return
 
-        # Update language/model settings
-        lang = self.dd_language.value
-        if lang == "auto": lang = None
-
         if self.chatgpt_client:
             self.chatgpt_client.model = self.dd_llm.value
 
+        # Источник распознавания (модель/сервер) проверяется здесь, при старте
+        # записи, а не при запуске приложения. Модель качается только сейчас.
+        rec = self.speech_recognizer
+        if getattr(rec, 'is_ready', True) is False:
+            self.btn_record.disabled = True
+            self.status_text.value = "Подготовка распознавания речи..."
+            self.page.update()
+
+            def _prepare():
+                try:
+                    rec.ensure_ready(status_cb=self._set_status)
+                except Exception as ex:
+                    self.btn_record.disabled = False
+                    self.status_text.value = "Распознавание недоступно"
+                    self.show_snack(f"{ex}", _C_ERROR)
+                    self.page.update()
+                    return
+                self.btn_record.disabled = False
+                self._begin_recording(in_idx, out_idx)
+
+            threading.Thread(target=_prepare, daemon=True).start()
+            return
+
+        self._begin_recording(in_idx, out_idx)
+
+    def _set_status(self, msg: str):
+        self.status_text.value = msg
+        self.page.update()
+
+    def _begin_recording(self, in_idx: int, out_idx: int):
         try:
             self._transcript_entries = []
             self.audio_capture.start_enhanced_recording(input_device_index=in_idx, output_device_index=out_idx)
             self.is_recording = True
             self.is_processing = True
-            
+
             # Start processing thread
             self.processing_thread = threading.Thread(target=self.process_audio, daemon=True)
             self.processing_thread.start()
@@ -175,7 +201,7 @@ class FletAudioAssistantUI:
             self.status_text.value = "Идёт запись..."
             self.pulse_ring.visible = True
             self.page.update()
-            
+
         except Exception as e:
             self.show_snack(f"Ошибка записи: {e}", ft.colors.RED_400)
 
@@ -588,7 +614,11 @@ class FletAudioAssistantUI:
         def _do():
             try:
                 rec.configure_source(mode, url, key, model)
-                self.status_text.value = f"STT: {rec.active_backend_name}"
+                if getattr(rec, 'is_ready', False):
+                    self.status_text.value = f"STT: {rec.active_backend_name}"
+                else:
+                    # Отложенная инициализация: источник проверится при записи
+                    self.status_text.value = "Источник сохранён — проверка при записи"
             except Exception as ex:
                 self.status_text.value = "Ошибка переключения STT"
                 self.show_snack(f"Ошибка STT: {ex}", _C_ERROR)
