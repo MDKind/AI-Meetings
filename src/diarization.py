@@ -13,10 +13,9 @@ if hasattr(sys, '_MEIPASS'):
     except Exception:
         pass
 
-_MODELS_DIR = os.path.join(
-    os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
-    'AI Meetings', 'models', 'diarization'
-)
+from utils.appdirs import get_models_dir
+
+_MODELS_DIR = os.path.join(get_models_dir(), 'diarization')
 
 _SEG_URL = (
     'https://github.com/k2-fsa/sherpa-onnx/releases/download/'

@@ -1,9 +1,9 @@
-; AI Meetings — InnoSetup 6 installer script
+; MDelta Meetings — InnoSetup 6 installer script
 ; Developer: Mikhail Depeshko
 ; Build: .\build_now.ps1  (from installer/ directory)
-; Output: dist\AI_Meetings_Setup.exe
+; Output: dist\MDelta_Meetings_Setup.exe
 
-#define AppName      "AI Meetings"
+#define AppName      "MDelta Meetings"
 #define AppVersion   "1.0"
 #define AppPublisher "Mikhail Depeshko"
 #define AppURL       "https://github.com/depeshko/ai-meetings"
@@ -21,7 +21,7 @@ DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 AllowNoIcons=yes
 OutputDir=..\dist
-OutputBaseFilename=AI_Meetings_Setup
+OutputBaseFilename=MDelta_Meetings_Setup
 SetupIconFile=assets\icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -30,7 +30,7 @@ PrivilegesRequired=admin
 MinVersion=10.0.17763
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
-UninstallDisplayIcon={app}\AI_Meetings.exe
+UninstallDisplayIcon={app}\MDelta_Meetings.exe
 UninstallDisplayName={#AppName}
 WizardImageFile=assets\wizard.bmp
 WizardSmallImageFile=assets\icon_small.bmp
@@ -49,14 +49,14 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
-RunAppLabel=Launch AI Meetings now
-russian.RunAppLabel=Запустить AI Meetings
+RunAppLabel=Launch MDelta Meetings now
+russian.RunAppLabel=Запустить MDelta Meetings
 
 ; ── Files ──────────────────────────────────────────────────────────────────────
 
 [Files]
 ; The compiled application (single executable)
-Source: "..\dist\AI_Meetings.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\MDelta_Meetings.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; FFmpeg — needed by Whisper at runtime
 Source: "bundled\ffmpeg\ffmpeg.exe";  DestDir: "{app}"; Flags: ignoreversion
@@ -69,8 +69,8 @@ Source: "..\data\whisper_service\*"; DestDir: "{app}\whisper_service"; Flags: ig
 Source: "assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userdesktop}\{#AppName}";         Filename: "{app}\AI_Meetings.exe"; IconFilename: "{app}\icon.ico"; Comment: "Launch AI Meetings"
-Name: "{group}\{#AppName}";               Filename: "{app}\AI_Meetings.exe"; IconFilename: "{app}\icon.ico"
+Name: "{userdesktop}\{#AppName}";         Filename: "{app}\MDelta_Meetings.exe"; IconFilename: "{app}\icon.ico"; Comment: "Launch MDelta Meetings"
+Name: "{group}\{#AppName}";               Filename: "{app}\MDelta_Meetings.exe"; IconFilename: "{app}\icon.ico"
 Name: "{group}\Uninstall {#AppName}";     Filename: "{uninstallexe}"
 
 [Registry]
@@ -81,7 +81,7 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 
 [Run]
 ; Offer to launch after install
-Filename: "{app}\AI_Meetings.exe"; \
+Filename: "{app}\MDelta_Meetings.exe"; \
   Description: "{cm:RunAppLabel}"; \
   Flags: nowait postinstall skipifsilent unchecked
 
@@ -134,7 +134,9 @@ function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
   if PageID = ModelPage.ID then
-    Result := FileExists(ExpandConstant('{localappdata}\AI Meetings\.env'));
+    { .env может лежать в новой или legacy-директории (до ребрендинга) }
+    Result := FileExists(ExpandConstant('{localappdata}\MDelta Meetings\.env'))
+      or FileExists(ExpandConstant('{localappdata}\AI Meetings\.env'));
 end;
 
 // ── PATH helpers ──────────────────────────────────────────────────────────────
@@ -159,15 +161,20 @@ procedure WriteEnvFile;
 var
   EnvPath, Content: String;
 begin
-  ForceDirectories(ExpandConstant('{localappdata}\AI Meetings'));
-  EnvPath := ExpandConstant('{localappdata}\AI Meetings\.env');
+  { Если настройки уже есть (в т.ч. в legacy-папке) — не трогаем;
+    приложение само мигрирует legacy-папку при первом запуске. }
+  if FileExists(ExpandConstant('{localappdata}\AI Meetings\.env')) then
+    Exit;
+
+  ForceDirectories(ExpandConstant('{localappdata}\MDelta Meetings'));
+  EnvPath := ExpandConstant('{localappdata}\MDelta Meetings\.env');
 
   // Don't overwrite on reinstall — user settings (API keys etc.) are preserved.
   // To change the Whisper model after reinstall, use the app Settings panel.
   if FileExists(EnvPath) then
     Exit;
 
-  Content := '# AI Meetings configuration' + #13#10;
+  Content := '# MDelta Meetings configuration' + #13#10;
   Content := Content + '# Developed by Mikhail Depeshko' + #13#10;
   Content := Content + '# Configure API via the app UI after launch' + #13#10 + #13#10;
   Content := Content + '# OpenAI cloud:' + #13#10;
@@ -239,7 +246,9 @@ begin
 
   if CurUninstallStep = usPostUninstall then
   begin
-    DataDir := ExpandConstant('{localappdata}\AI Meetings');
+    DataDir := ExpandConstant('{localappdata}\MDelta Meetings');
+    if not DirExists(DataDir) then
+      DataDir := ExpandConstant('{localappdata}\AI Meetings');
     if DirExists(DataDir) then
     begin
       Msg := 'Удалить данные приложения (модели Whisper, настройки, .env)?' + #13#10 +

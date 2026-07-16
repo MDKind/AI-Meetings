@@ -262,3 +262,101 @@ class TestApplyWin32Icon:
             captured_worker['fn']()
 
         mock_user32.SendMessageW.assert_not_called()
+
+
+# ── Новые секции настроек: STT-источник и LLM-провайдер ──────────────────────
+
+class TestSettingsSections:
+
+    def test_settings_dialog_has_new_controls(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        assert ui.rg_stt is not None
+        assert ui.rg_llm is not None
+        assert ui.tb_stt_url is not None
+        assert ui.dd_stt_model is not None
+        assert ui.tb_mdelta_url is not None
+        assert ui.tb_mdelta_user is not None
+        assert ui.tb_mdelta_pass is not None
+
+    def test_toggle_provider_fields_visibility(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.rg_llm.value = "mdelta"
+        ui._toggle_provider_fields()
+        assert ui.mdelta_fields.visible is True
+        assert ui.inference_fields.visible is False
+
+        ui.rg_llm.value = "inference"
+        ui._toggle_provider_fields()
+        assert ui.mdelta_fields.visible is False
+        assert ui.inference_fields.visible is True
+
+    def test_toggle_stt_fields_visibility(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.rg_stt.value = "remote"
+        ui._toggle_stt_fields()
+        assert ui.remote_stt_fields.visible is True
+
+        ui.rg_stt.value = "local"
+        ui._toggle_stt_fields()
+        assert ui.remote_stt_fields.visible is False
+
+    def test_save_env_extra_pairs(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui._save_env("", "", "", extra={
+            "LLM_PROVIDER": "mdelta",
+            "MDELTA_API_URL": "http://mdelta.local",
+            "WHISPER_MODE": "remote",
+            "WHISPER_REMOTE_URL": "http://srv:8000/v1",
+            "EMPTY_SKIPPED": "",
+        })
+        content = (tmp_path / ".env").read_text()
+        assert "LLM_PROVIDER=mdelta" in content
+        assert "MDELTA_API_URL=http://mdelta.local" in content
+        assert "WHISPER_MODE=remote" in content
+        assert "WHISPER_REMOTE_URL=http://srv:8000/v1" in content
+        assert "EMPTY_SKIPPED" not in content
+
+    def test_apply_api_settings_updates_provider(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.speech_recognizer = None  # STT-переключение отдельно тестируется
+
+        ui.rg_llm.value = "mdelta"
+        ui.tb_mdelta_url.value = "http://mdelta.local"
+        ui.tb_mdelta_user.value = "admin"
+        ui.tb_mdelta_pass.value = "secret"
+        ui.tb_api_key.value = ""
+        ui.tb_base_url.value = ""
+        ui.dd_llm.value = "gpt-4o"
+        ui.rg_stt.value = "local"
+
+        ui.apply_api_settings()
+
+        client = ui.chatgpt_client
+        assert client.provider == "mdelta"
+        assert client.mdelta_base_url == "http://mdelta.local"
+        assert client.mdelta_username == "admin"
+        assert client.mdelta_password == "secret"
+        client._reinit_client.assert_called()
+
+        content = (tmp_path / ".env").read_text()
+        assert "LLM_PROVIDER=mdelta" in content
+        assert "MDELTA_USERNAME=admin" in content
+        assert "WHISPER_MODE=local" in content
+
+    def test_open_settings_adds_unknown_model_to_options(self, tmp_path):
+        """Модель из .env, отсутствующая в списке, добавляется в options Dropdown."""
+        ui = _make_ui(tmp_path)
+        client = ui.chatgpt_client
+        client.api_key = "sk-x"
+        client.base_url = "http://127.0.0.1:1234/v1"
+        client.model = "openai/gpt-oss-20b"
+        client.provider = "inference"
+        client.mdelta_base_url = ""
+        client.mdelta_username = ""
+        client.mdelta_password = ""
+        ui.speech_recognizer = None
+
+        ui._open_settings()
+
+        assert "openai/gpt-oss-20b" in [o.key for o in ui.dd_llm.options]
+        assert ui.dd_llm.value == "openai/gpt-oss-20b"

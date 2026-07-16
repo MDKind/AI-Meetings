@@ -1,7 +1,7 @@
 """
 utils/storage.py — единый интерфейс хранения транскрипций и саммари.
 
-Текущая реализация: JSON-файлы в %LOCALAPPDATA%\\AI Meetings\\sessions\\
+Текущая реализация: JSON-файлы в %LOCALAPPDATA%\\MDelta Meetings\\sessions\\
 Будущая: подключаемая БД (SQLite / PostgreSQL / etc.) —
   достаточно заменить тело StorageBackend не меняя остальной код.
 
@@ -30,10 +30,8 @@ from datetime import datetime
 
 
 def _sessions_dir() -> str:
-    base = os.path.join(
-        os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
-        'AI Meetings', 'sessions'
-    )
+    from utils.appdirs import get_app_dir
+    base = os.path.join(get_app_dir(), 'sessions')
     os.makedirs(base, exist_ok=True)
     return base
 

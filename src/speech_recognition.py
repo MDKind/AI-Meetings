@@ -7,6 +7,7 @@ import traceback
 import wave
 import uuid
 import numpy as np
+from utils.appdirs import get_models_dir
 from utils.config import SPEECH_RECOGNITION
 
 
@@ -27,11 +28,7 @@ GGML_MODEL_URLS = {
 
 def _ggml_model_path(model_name: str) -> str:
     """Возвращает путь к GGML модели, скачивая если нужно."""
-    models_dir = os.path.join(
-        os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
-        'AI Meetings', 'models'
-    )
-    os.makedirs(models_dir, exist_ok=True)
+    models_dir = get_models_dir()
 
     filename = f'ggml-{model_name}.bin'
     path = os.path.join(models_dir, filename)
@@ -289,10 +286,7 @@ class FasterWhisperBackend:
     @staticmethod
     def _ensure_model(model_name: str) -> str:
         """Скачивает модель в локальную папку без symlinks и возвращает путь."""
-        local_dir = os.path.join(
-            os.environ.get('LOCALAPPDATA', os.path.expanduser('~')),
-            'AI Meetings', 'models', f'faster-whisper-{model_name}'
-        )
+        local_dir = os.path.join(get_models_dir(), f'faster-whisper-{model_name}')
         marker = os.path.join(local_dir, 'model.bin')
 
         # Если модель уже скачана и файл не пустой — используем её
@@ -389,36 +383,150 @@ class FasterWhisperBackend:
 
 
 # ---------------------------------------------------------------------------
+# Remote Whisper backend — OpenAI-совместимый сервер транскрипции
+# ---------------------------------------------------------------------------
+
+def fetch_remote_whisper_models(base_url: str, api_key: str = '') -> list:
+    """Возвращает список id моделей с OpenAI-совместимого сервера (GET /models)."""
+    import requests
+    if not base_url:
+        return []
+    url = base_url.rstrip('/') + '/models'
+    headers = {}
+    if api_key and api_key != 'local':
+        headers['Authorization'] = f'Bearer {api_key}'
+    resp = requests.get(url, headers=headers, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    items = data if isinstance(data, list) else data.get('data', [])
+    return [m.get('id', str(m)) if isinstance(m, dict) else str(m) for m in items]
+
+
+class RemoteWhisperBackend:
+    """
+    Клиент OpenAI-совместимого эндпоинта /audio/transcriptions.
+
+    Работает с whisper-моделями, развёрнутыми на сервере:
+    LM Studio, speaches / faster-whisper-server, vLLM, whisper.cpp server,
+    а также облачный OpenAI Audio API.
+    """
+
+    REQUEST_TIMEOUT = 120  # сек на транскрипцию одного сегмента
+
+    def __init__(self, base_url: str, model: str, language: str, api_key: str = ''):
+        if not base_url:
+            raise ValueError("Не указан URL удалённого Whisper-сервера")
+        self.base_url = base_url.rstrip('/')
+        self.model = model or 'whisper-1'
+        self.language = language or ''
+        self.api_key = api_key or ''
+
+        # Быстрая проверка доступности сервера, чтобы упасть сразу
+        # (и дать SpeechRecognizer шанс на fallback), а не на первом сегменте.
+        import requests
+        try:
+            requests.get(
+                self.base_url + '/models',
+                headers=self._headers(),
+                timeout=5,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Удалённый Whisper-сервер недоступен: {self.base_url} ({e})"
+            ) from e
+
+    def _headers(self) -> dict:
+        if self.api_key and self.api_key != 'local':
+            return {'Authorization': f'Bearer {self.api_key}'}
+        return {}
+
+    def set_language(self, language: str):
+        self.language = language or ''
+
+    def transcribe(self, wav_bytes: bytes) -> str:
+        import requests
+        url = self.base_url + '/audio/transcriptions'
+        files = {'file': ('segment.wav', wav_bytes, 'audio/wav')}
+        data = {'model': self.model, 'response_format': 'json'}
+        if self.language:
+            data['language'] = self.language
+
+        resp = requests.post(
+            url, files=files, data=data,
+            headers=self._headers(), timeout=self.REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, dict):
+            return (payload.get('text') or '').strip()
+        return str(payload).strip()
+
+    def close(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
 # SpeechRecognizer — публичный API
 # ---------------------------------------------------------------------------
 
 class SpeechRecognizer:
     """
-    Распознавание речи.
-    Использует WhisperNet (whisper.net + Vulkan) если доступен,
-    иначе падает на faster-whisper (CPU).
+    Распознавание речи. Источник выбирается настройкой mode:
+      'local'  — WhisperNet (Vulkan GPU), при недоступности faster-whisper (CPU)
+      'remote' — OpenAI-совместимый сервер (LM Studio, speaches, vLLM, OpenAI);
+                 при недоступности сервера — автоматический fallback на local.
     """
 
     NO_SPEECH_THRESHOLD = 0.6
 
-    def __init__(self, model_name=SPEECH_RECOGNITION['default_model']):
+    # Классовые дефолты — инстанс может создаваться в обход __init__ (тесты)
+    mode = 'local'
+    remote_base_url = ''
+    remote_api_key = ''
+    remote_model = 'whisper-1'
+
+    def __init__(self, model_name=SPEECH_RECOGNITION['default_model'],
+                 mode=None, remote_base_url=None, remote_api_key=None,
+                 remote_model=None):
         self.model_name = model_name
-        language = SPEECH_RECOGNITION['default_language']
+        self.mode = mode if mode is not None else SPEECH_RECOGNITION.get('mode', 'local')
+        self.remote_base_url = (remote_base_url if remote_base_url is not None
+                                else SPEECH_RECOGNITION.get('remote_base_url', ''))
+        self.remote_api_key = (remote_api_key if remote_api_key is not None
+                               else SPEECH_RECOGNITION.get('remote_api_key', ''))
+        self.remote_model = (remote_model if remote_model is not None
+                             else SPEECH_RECOGNITION.get('remote_model', 'whisper-1'))
 
         self._backend = None
         self._ensure_temp_dir()
+        language = SPEECH_RECOGNITION['default_language']
+        self._backend = self._build_backend(model_name, language)
 
-        # Пробуем WhisperNet (GPU)
+    def _build_backend(self, model_name: str, language: str):
+        """Создаёт backend согласно self.mode с цепочкой fallback'ов."""
+        if self.mode == 'remote':
+            try:
+                backend = RemoteWhisperBackend(
+                    self.remote_base_url, self.remote_model,
+                    language, self.remote_api_key,
+                )
+                print(f"[SpeechRecognizer] Backend: Remote Whisper ({self.remote_base_url})")
+                return backend
+            except Exception as e:
+                print(f"[SpeechRecognizer] Remote Whisper недоступен: {e} — fallback на локальные бэкенды")
+
         _wn_err = None
         try:
-            self._backend = WhisperNetBackend(model_name, language)
+            backend = WhisperNetBackend(model_name, language)
             print("[SpeechRecognizer] Backend: WhisperNet (Vulkan GPU)")
+            return backend
         except Exception as e:
             _wn_err = e
             print(f"[SpeechRecognizer] WhisperNet недоступен: {e} — fallback на faster-whisper")
             try:
-                self._backend = FasterWhisperBackend(model_name, language)
+                backend = FasterWhisperBackend(model_name, language)
                 print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
+                return backend
             except Exception as fw_err:
                 raise RuntimeError(
                     f"Не удалось запустить распознавание речи.\n\n"
@@ -427,38 +535,68 @@ class SpeechRecognizer:
                     f"Попробуйте выбрать другую модель (tiny или base) в боковой панели приложения."
                 ) from fw_err
 
+    def _current_language(self) -> str:
+        if self._backend:
+            if hasattr(self._backend, '_language'):
+                return self._backend._language
+            if hasattr(self._backend, 'language'):
+                return self._backend.language
+        return ''
+
     def set_model(self, model_name: str):
-        """Меняет модель Whisper. Перезапускает backend с новой моделью."""
+        """Меняет локальную модель Whisper. Перезапускает backend с новой моделью."""
         if model_name == self.model_name:
             return
         print(f"[SpeechRecognizer] Смена модели: '{self.model_name}' → '{model_name}'")
-        language = ''
-        if self._backend:
-            if hasattr(self._backend, '_language'):
-                language = self._backend._language
-            elif hasattr(self._backend, 'language'):
-                language = self._backend.language
+        language = self._current_language()
         self.close()
         self.model_name = model_name
         self._ensure_temp_dir()
         lang = language or SPEECH_RECOGNITION['default_language']
-        _wn_err = None
-        try:
-            self._backend = WhisperNetBackend(model_name, lang)
-            print("[SpeechRecognizer] Backend: WhisperNet (Vulkan GPU)")
-        except Exception as e:
-            _wn_err = e
-            print(f"[SpeechRecognizer] WhisperNet недоступен: {e} — fallback на faster-whisper")
-            try:
-                self._backend = FasterWhisperBackend(model_name, lang)
-                print("[SpeechRecognizer] Backend: faster-whisper (CPU)")
-            except Exception as fw_err:
-                raise RuntimeError(
-                    f"Не удалось запустить распознавание речи.\n\n"
-                    f"WhisperNet: {_wn_err}\n\n"
-                    f"FasterWhisper: {fw_err}\n\n"
-                    f"Попробуйте выбрать другую модель (tiny или base) в боковой панели приложения."
-                ) from fw_err
+        self._backend = self._build_backend(model_name, lang)
+
+    def configure_source(self, mode: str, remote_base_url: str = '',
+                         remote_api_key: str = '', remote_model: str = ''):
+        """Переключает источник распознавания (local/remote) и пересоздаёт backend.
+
+        Вызывается из настроек UI. При mode='remote' и недоступном сервере
+        бросает исключение ТОЛЬКО если недоступны и локальные бэкенды —
+        иначе тихо переходит на локальный (принцип graceful degradation).
+        """
+        mode = mode if mode in ('local', 'remote') else 'local'
+        no_change = (
+            mode == self.mode
+            and (mode == 'local' or (
+                remote_base_url == self.remote_base_url
+                and remote_api_key == self.remote_api_key
+                and remote_model == self.remote_model
+            ))
+            and self._backend is not None
+        )
+        if no_change:
+            return
+
+        language = self._current_language()
+        self.close()
+        self.mode = mode
+        if mode == 'remote':
+            self.remote_base_url = remote_base_url
+            self.remote_api_key = remote_api_key
+            self.remote_model = remote_model or 'whisper-1'
+        self._ensure_temp_dir()
+        lang = language or SPEECH_RECOGNITION['default_language']
+        self._backend = self._build_backend(self.model_name, lang)
+
+    @property
+    def active_backend_name(self) -> str:
+        """Человекочитаемое имя активного бэкенда для статуса в UI."""
+        if isinstance(self._backend, RemoteWhisperBackend):
+            return f"Remote ({self._backend.base_url})"
+        if isinstance(self._backend, WhisperNetBackend):
+            return "WhisperNet (GPU)"
+        if isinstance(self._backend, FasterWhisperBackend):
+            return "faster-whisper (CPU)"
+        return "—"
 
     def _ensure_temp_dir(self):
         temp_dir = SPEECH_RECOGNITION['temp_dir']

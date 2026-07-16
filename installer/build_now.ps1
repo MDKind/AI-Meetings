@@ -1,5 +1,5 @@
-# Build script for AI Meetings installer
-# Prerequisite: dist\AI_Meetings.exe must already exist
+# Build script for MDelta Meetings installer
+# Prerequisite: dist\MDelta_Meetings.exe must already exist
 # Usage: .\build_now.ps1  (double-click or run from PowerShell)
 Set-Location $PSScriptRoot
 $ErrorActionPreference = "Stop"
@@ -20,19 +20,19 @@ $RepoRoot   = Split-Path -Parent $PSScriptRoot
 $AssetsDir  = Join-Path $PSScriptRoot "assets"
 $BundledDir = Join-Path $PSScriptRoot "bundled\ffmpeg"
 $DistDir    = Join-Path $RepoRoot "dist"
-$AppExe     = Join-Path $DistDir "AI_Meetings.exe"
+$AppExe     = Join-Path $DistDir "MDelta_Meetings.exe"
 
-Write-Host "AI Meetings - Building Setup Installer" -ForegroundColor Cyan
+Write-Host "MDelta Meetings - Building Setup Installer" -ForegroundColor Cyan
 
 # [1] Check compiled app
 if (-not (Test-Path $AppExe)) {
-    Write-Host "ERROR: dist\AI_Meetings.exe not found." -ForegroundColor Red
+    Write-Host "ERROR: dist\MDelta_Meetings.exe not found." -ForegroundColor Red
     Write-Host "Build it first:" -ForegroundColor Yellow
-    Write-Host "  build_venv\Scripts\python.exe -m PyInstaller AI_Meetings.spec --clean" -ForegroundColor White
+    Write-Host "  build_venv\Scripts\python.exe -m PyInstaller MDelta_Meetings.spec --clean" -ForegroundColor White
     exit 1
 }
 $szApp = [math]::Round((Get-Item $AppExe).Length / 1MB, 0)
-Write-Host "[1/4] AI_Meetings.exe found ($szApp MB)" -ForegroundColor Green
+Write-Host "[1/4] MDelta_Meetings.exe found ($szApp MB)" -ForegroundColor Green
 
 # [2] Assets
 New-Item -ItemType Directory -Force -Path $AssetsDir | Out-Null
@@ -93,13 +93,13 @@ if (-not ((Test-Path $FfmpegExe) -and (Test-Path $FfprobeExe))) {
 # LICENSE
 $LicFile = Join-Path $RepoRoot "LICENSE.txt"
 if (-not (Test-Path $LicFile)) {
-    Set-Content $LicFile "MIT License`r`nCopyright (c) 2025 AI Meetings"
+    Set-Content $LicFile "MIT License`r`nCopyright (c) 2026 MDelta Meetings"
 }
 
 # [4] Patch .iss and build
 Write-Host "[4/4] Compiling installer..." -ForegroundColor Yellow
 $IssFile    = Join-Path $PSScriptRoot "setup.iss"
-$IssTmp     = Join-Path $env:TEMP "ai_meetings_setup.iss"
+$IssTmp     = Join-Path $env:TEMP "mdelta_meetings_setup.iss"
 $IssContent = Get-Content $IssFile -Raw -Encoding UTF8
 
 $VersionFile = Join-Path $RepoRoot "version.txt"
@@ -123,7 +123,7 @@ $IssContent = $IssContent.Replace('Source: "assets\',             "Source: `"$PS
 $IssContent = $IssContent.Replace('#define AppVersion   "1.0"',           "#define AppVersion   `"$AppVersion`"")
 $IssContent = $IssContent.Replace('VersionInfoVersion=1.0.0.0',           "VersionInfoVersion=$AppVersion.0")
 $IssContent = $IssContent.Replace('VersionInfoProductVersion=1.0.0.0',    "VersionInfoProductVersion=$AppVersion.0")
-$IssContent = $IssContent.Replace('OutputBaseFilename=AI_Meetings_Setup', "OutputBaseFilename=AI_Meetings_Setup_v$AppVersion")
+$IssContent = $IssContent.Replace('OutputBaseFilename=MDelta_Meetings_Setup', "OutputBaseFilename=MDelta_Meetings_Setup_v$AppVersion")
 
 Set-Content -Path $IssTmp -Value $IssContent -Encoding UTF8
 
@@ -136,7 +136,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$OutExe = Join-Path $DistDir "AI_Meetings_Setup_v$AppVersion.exe"
+$OutExe = Join-Path $DistDir "MDelta_Meetings_Setup_v$AppVersion.exe"
 if (Test-Path $OutExe) {
     $sz = [math]::Round((Get-Item $OutExe).Length / 1MB, 0)
     Write-Host ""

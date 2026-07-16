@@ -1,30 +1,38 @@
-# AI Meetings — Аудио-ассистент для встреч
+# MDelta Meetings — Аудио-ассистент для встреч
 
-Запись, транскрипция и умное саммари встреч с интеграцией LLM (OpenAI / LM Studio / Ollama).
+Запись, транскрипция и умное саммари встреч. Desktop-приложение экосистемы **MDelta**
+с интеграцией LLM (Inference: OpenAI / LM Studio / Ollama — или MDelta API).
 
 ## Возможности
 
 - Запись микрофона и системного звука одновременно (WASAPI loopback)
-- Распознавание речи — два бэкенда с автоматическим выбором:
-  - **WhisperNet** (primary): C# + whisper.net + Vulkan GPU — работает на любом GPU через DirectX
-  - **faster-whisper** (fallback): CTranslate2, CPU int8 — 2-4× быстрее openai-whisper без GPU
+- Распознавание речи — выбор источника в настройках (в т.ч. после установки):
+  - **Локально**: **WhisperNet** (C# + whisper.net + Vulkan GPU — любой GPU через DirectX)
+    с fallback на **faster-whisper** (CTranslate2, CPU int8)
+  - **Удалённый сервер**: любой OpenAI-совместимый `/v1/audio/transcriptions` —
+    LM Studio, speaches / faster-whisper-server, vLLM, облачный OpenAI
 - Голосовая активация (Silero VAD / RMS fallback) — без ложных срабатываний на фон
 - **Диаризация спикеров** — разбивка транскрипта по участникам ("Участник 1/2/...") по окончании записи
-- Саммари встречи через OpenAI API или любой OpenAI-совместимый сервер (LM Studio, Ollama)
-- Современный UI на Flutter (Flet) с тёмной темой
-- Настройки API сохраняются в `.env` через UI-диалог
+- Саммари встречи — провайдер на выбор (секция «ИЛИ» в настройках):
+  - **Inference** — OpenAI API или любой OpenAI-совместимый сервер (LM Studio, Ollama, vLLM)
+  - **MDelta API** — корпоративная RAG-платформа MDelta (JWT-авторизация, `/api/chat`)
+- UI на Flutter (Flet) в дизайн-системе MDelta (Ant Design v5, светлая тема, фирменный логотип)
+- Настройки сохраняются в `.env` через UI-диалог; данные старой установки «AI Meetings»
+  переносятся в `%LOCALAPPDATA%\MDelta Meetings` автоматически
 
 ## Установка для конечного пользователя
 
-Запустите `dist\AI_Meetings_Setup_v*.exe` — мастер установит приложение и предложит ввести API-ключ.  
-При первом запуске приложение автоматически скачает модель Whisper (~75–150 MB) в `%LOCALAPPDATA%\AI Meetings\models\`.
+Запустите `dist\MDelta_Meetings_Setup_v*.exe` — мастер установит приложение и предложит ввести API-ключ.  
+При первом запуске приложение автоматически скачает модель Whisper (~75–150 MB) в `%LOCALAPPDATA%MDelta Meetings\models\`.
 
 ## Dev: сборка
 
 ### Требования
 
 - Windows 10/11 64-bit (WASAPI, Vulkan)
-- Python 3.11 (проверено; 3.13 тоже работает)
+- Python 3.11–3.13 — **только обычный установщик с python.org**, не Microsoft Store
+  (Store-версия виртуализирует записи в `%LOCALAPPDATA%` через MSIX LocalCache —
+  Python «видит» скачанные модели, а WhisperService.exe нет)
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — для сборки WhisperService
 - Inno Setup 6 (`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`)
 
@@ -55,11 +63,11 @@ AI_Meetings/
 │   └── bundled/ffmpeg/        # ffmpeg.exe, ffprobe.exe (не в git)
 ├── data/
 │   └── whisper_service/       # Артефакт dotnet publish (не в git)
-├── AI_Meetings.spec           # PyInstaller spec
+├── MDelta_Meetings.spec           # PyInstaller spec
 ├── version.txt                # Единый источник версии (например: 1.0.0)
 └── dist/                      # Артефакты сборки (не в git)
-    ├── AI_Meetings.exe
-    └── AI_Meetings_Setup_v*.exe
+    ├── MDelta_Meetings.exe
+    └── MDelta_Meetings_Setup_v*.exe
 ```
 
 ### Шаг 1: Создать чистый venv для сборки
@@ -81,13 +89,13 @@ dotnet publish whisper_service/WhisperService.csproj -c Release -r win-x64 --sel
 
 Результат: `data/whisper_service/WhisperService.exe` + Vulkan runtime DLL.
 
-### Шаг 3: Собрать AI_Meetings.exe
+### Шаг 3: Собрать MDelta_Meetings.exe
 
 ```powershell
-build_venv\Scripts\python.exe -m PyInstaller AI_Meetings.spec --clean
+build_venv\Scripts\python.exe -m PyInstaller MDelta_Meetings.spec --clean
 ```
 
-Результат: `dist\AI_Meetings.exe` (single-file bundle).
+Результат: `dist\MDelta_Meetings.exe` (single-file bundle).
 
 ### Шаг 4: Собрать инсталлятор
 
@@ -96,10 +104,10 @@ cd installer
 .\build_now.ps1
 ```
 
-Результат: `dist\AI_Meetings_Setup_v<version>.exe`.
+Результат: `dist\MDelta_Meetings_Setup_v<version>.exe`.
 
 **Что делает build_now.ps1:**
-1. Проверяет наличие `dist\AI_Meetings.exe` и `data\whisper_service\WhisperService.exe`
+1. Проверяет наличие `dist\MDelta_Meetings.exe` и `data\whisper_service\WhisperService.exe`
 2. Создаёт `assets\` если нет (placeholder иконка/bitmap)
 3. Скачивает FFmpeg в `bundled\ffmpeg\` если нет
 4. Патчит `setup.iss` (заменяет относительные пути `..\dist` → абсолютные) через `.Replace()` (не regex — нет проблем с backslash)
@@ -115,7 +123,7 @@ cd installer
 | Место | Как обновляется |
 |---|---|
 | Заголовок окна приложения | `flet_ui.py` читает `version.txt` в рантайме (бандл включает файл) |
-| Имя инсталлятора | `build_now.ps1` патчит: `AI_Meetings_Setup_v1.0.0.exe` |
+| Имя инсталлятора | `build_now.ps1` патчит: `MDelta_Meetings_Setup_v1.0.0.exe` |
 | Метаданные инсталлятора (Properties) | `build_now.ps1` патчит `VersionInfoVersion` и `VersionInfoProductVersion` в `setup.iss` |
 | Экран готовности Inno Setup | `setup.iss` использует `{#AppVersion}` напрямую |
 
@@ -126,32 +134,61 @@ cd installer
 При пуше в `master` (или ручном запуске через *workflow_dispatch*) CI автоматически:
 1. Собирает WhisperService через `dotnet publish`
 2. Прогоняет тесты (`pytest tests/`)
-3. Упаковывает `AI_Meetings.exe` через PyInstaller
-4. Собирает `AI_Meetings_Setup_v*.exe` через Inno Setup
+3. Упаковывает `MDelta_Meetings.exe` через PyInstaller
+4. Собирает `MDelta_Meetings_Setup_v*.exe` через Inno Setup
 5. Публикует инсталлятор как **Artifact** (хранится 7 дней)
 
 Файл пайплайна: `.github/workflows/build.yml`.
 
 ## Настройка (.env)
 
-При установке создаётся `%LOCALAPPDATA%\AI Meetings\.env` (не перезаписывается при переустановке).  
+При установке создаётся `%LOCALAPPDATA%MDelta Meetings\.env` (не перезаписывается при переустановке).  
 Для dev-запуска: скопируйте `.env.example` → `.env` в корне репозитория.
 
 Настройки также можно изменить через кнопку ⚙️ в приложении — они сохраняются в тот же `.env`.
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
+| `LLM_PROVIDER` | `inference` | Провайдер LLM: `inference` (OpenAI-совместимый) или `mdelta` (MDelta API) |
 | `OPENAI_API_KEY` | — | Ключ OpenAI (обязателен для облака) |
 | `OPENAI_API_BASE` | пусто | URL для LM Studio / Ollama |
 | `CHATGPT_MODEL` | `gpt-4o` | Модель LLM |
-| `WHISPER_MODEL` | `base` | Размер модели (tiny/base/small/medium/large) |
+| `MDELTA_API_URL` | пусто | URL MDelta API (например `https://mdrag.example.com`) |
+| `MDELTA_USERNAME` | пусто | Логин MDelta |
+| `MDELTA_PASSWORD` | пусто | Пароль MDelta |
+| `WHISPER_MODE` | `local` | Источник STT: `local` или `remote` |
+| `WHISPER_MODEL` | `base` | Размер локальной модели (tiny/base/small/medium/large) |
+| `WHISPER_REMOTE_URL` | пусто | URL удалённого Whisper-сервера (`.../v1`) |
+| `WHISPER_REMOTE_KEY` | пусто | API-ключ удалённого сервера (если требуется) |
+| `WHISPER_REMOTE_MODEL` | `whisper-1` | Имя модели на удалённом сервере |
 | `WHISPER_LANGUAGE` | `ru` | Язык распознавания |
 
 Примеры `OPENAI_API_BASE`:
 - LM Studio: `http://127.0.0.1:1234/v1`
 - Ollama: `http://127.0.0.1:11434/v1`
 
+## Провайдеры LLM (саммаризация)
+
+Секция «Обработка и саммаризация (LLM)» в настройках — переключатель ИЛИ:
+
+- **Inference** — OpenAI SDK / LM Studio Runtime API. Ключ, Base URL и модель задаются в UI;
+  кнопка 🔄 загружает список моделей с сервера (`GET /v1/models`).
+- **MDelta API** — вход по логину/паролю (JWT `POST /api/auth/login`), диалог через
+  `POST /api/chat`. Модель и RAG-пайплайн выбираются на стороне платформы MDelta.
+  Кнопка «Проверить подключение» выполняет тестовый логин.
+
 ## Бэкенды транскрипции
+
+Секция «Распознавание речи (Whisper)» в настройках — переключатель ИЛИ:
+**Локальная модель** (WhisperNet → faster-whisper) или **Удалённый сервер**.
+
+### Remote Whisper (удалённый сервер)
+
+Любой OpenAI-совместимый эндпоинт `POST /v1/audio/transcriptions` (multipart WAV):
+LM Studio, [speaches](https://github.com/speaches-ai/speaches) / faster-whisper-server,
+vLLM, whisper.cpp server, облачный OpenAI Audio API.
+Кнопка 🔄 в настройках загружает список моделей с сервера (`GET /v1/models`).
+Если сервер недоступен при старте — автоматический fallback на локальные бэкенды.
 
 ### WhisperNet (primary, GPU via Vulkan)
 
@@ -168,13 +205,13 @@ Python запускает `WhisperService.exe` как subprocess и общает
 ### faster-whisper (fallback, CPU)
 
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2, int8-квантизация.  
-Работает без GPU. Модели скачиваются при первом запуске в `%LOCALAPPDATA%\AI Meetings\models\faster-whisper-<name>\`.
+Работает без GPU. Модели скачиваются при первом запуске в `%LOCALAPPDATA%MDelta Meetings\models\faster-whisper-<name>\`.
 
 Если доступна CUDA — используется GPU (float16). Логика выбора: `speech_recognition.py`, функция `_select_ct2_device()`.
 
 ### GGML-модели для WhisperNet
 
-GGML `.bin` файлы (формат whisper.cpp) скачиваются из HuggingFace в `%LOCALAPPDATA%\AI Meetings\models\`:
+GGML `.bin` файлы (формат whisper.cpp) скачиваются из HuggingFace в `%LOCALAPPDATA%MDelta Meetings\models\`:
 
 | Модель | Размер | Точность |
 |---|---|---|
@@ -216,7 +253,7 @@ GGML `.bin` файлы (формат whisper.cpp) скачиваются из Hu
 Без него функция недоступна, остальное приложение работает в обычном режиме.
 
 При первом использовании автоматически скачиваются модели (~15 МБ) в
-`%LOCALAPPDATA%\AI Meetings\models\diarization\`:
+`%LOCALAPPDATA%MDelta Meetings\models\diarization\`:
 - Segmentation model — [pyannote/segmentation-3.0](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-segmentation-models) (~6 МБ)
 - Embedding model — [3D-Speaker eres2net](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recognition-models) (~9 МБ)
 

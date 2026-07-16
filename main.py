@@ -21,10 +21,11 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = sys.stdout
 
-# Загружаем .env из %LOCALAPPDATA%\AI Meetings\.env
-# (туда же где temp-директория — доступно на запись даже при установке в Program Files)
-_env_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'AI Meetings')
-os.makedirs(_env_dir, exist_ok=True)
+# Загружаем .env из %LOCALAPPDATA%\MDelta Meetings\.env
+# (туда же где temp-директория — доступно на запись даже при установке в Program Files).
+# get_app_dir() автоматически мигрирует данные из старой папки "AI Meetings".
+from utils.appdirs import get_app_dir
+_env_dir = get_app_dir()
 _env_path = os.path.join(_env_dir, '.env')
 # Если в LOCALAPPDATA нет .env — пробуем рядом с exe (для dev-запуска)
 if not os.path.exists(_env_path):
@@ -54,8 +55,8 @@ class _SplashWriter:
             # Прогресс скачивания занимает диапазон 0.4–0.75 общей полосы
             overall = 0.4 + (pct / 100.0) * 0.35
             self._canvas.delete('progress')
-            self._canvas.create_rectangle(0, 0, 400 * overall, 20,
-                                          fill='#4CAF50', tags='progress')
+            self._canvas.create_rectangle(0, 0, 400 * overall, 8,
+                                          fill='#1677FF', width=0, tags='progress')
             self._label['text'] = f'Скачивание модели Whisper: {pct}%'
             try:
                 self._root.update()
@@ -71,34 +72,44 @@ def main():
     """
     Основная функция для запуска приложения
     """
-    # Создаем корневое окно Tkinter
+    # Создаем корневое окно Tkinter (splash в фирменном стиле MDelta)
     root = tk.Tk()
-    root.title("Загрузка AI Meetings...")
+    root.title("Загрузка MDelta Meetings...")
     root.geometry("500x300")
-    
-    # Добавляем индикатор загрузки
-    title_label = tk.Label(root, text="AI Meetings Assistant", font=("Arial", 18, "bold"))
-    title_label.pack(pady=10)
-    
-    description_label = tk.Label(root, 
-                                text="Ассистент для обработки аудио и генерации саммари встреч",
-                                font=("Arial", 10))
+    root.configure(bg="white")
+
+    # Логотип-дельта + название (как в MDelta)
+    logo_canvas = tk.Canvas(root, width=48, height=48, bg="white", highlightthickness=0)
+    logo_canvas.pack(pady=(18, 0))
+    logo_canvas.create_polygon(24, 4, 44, 42, 4, 42, fill="#1677FF", outline="")
+    logo_canvas.create_line(13, 38, 20, 22, 24, 30, 28, 18, 35, 38,
+                            fill="white", width=3, joinstyle=tk.ROUND, capstyle=tk.ROUND)
+
+    title_label = tk.Label(root, text="MDelta Meetings", font=("Segoe UI", 18, "bold"),
+                           bg="white", fg="#1F1F1F")
+    title_label.pack(pady=(4, 0))
+
+    description_label = tk.Label(root,
+                                text="Запись, транскрипция и саммари встреч",
+                                font=("Segoe UI", 10), bg="white", fg="#8C8C8C")
     description_label.pack(pady=5)
-    
-    loading_label = tk.Label(root, text="Инициализация компонентов...", font=("Arial", 12))
-    loading_label.pack(pady=20)
-    
-    progress = tk.Label(root, text="Подождите...", font=("Arial", 10))
-    progress.pack(pady=10)
-    
+
+    loading_label = tk.Label(root, text="Инициализация компонентов...",
+                             font=("Segoe UI", 11), bg="white", fg="#1F1F1F")
+    loading_label.pack(pady=12)
+
+    progress = tk.Label(root, text="Подождите...", font=("Segoe UI", 9),
+                        bg="white", fg="#8C8C8C")
+    progress.pack(pady=4)
+
     # Создаем полосу прогресса
-    progress_bar = tk.Canvas(root, width=400, height=20, bg="white")
+    progress_bar = tk.Canvas(root, width=400, height=8, bg="#F0F0F0", highlightthickness=0)
     progress_bar.pack(pady=10)
-    
+
     # Функция для обновления полосы прогресса
     def update_progress(value, text):
         progress_bar.delete("progress")
-        progress_bar.create_rectangle(0, 0, 400 * value, 20, fill="#4CAF50", tags="progress")
+        progress_bar.create_rectangle(0, 0, 400 * value, 8, fill="#1677FF", width=0, tags="progress")
         progress["text"] = text
         root.update()
     

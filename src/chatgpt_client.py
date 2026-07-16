@@ -12,18 +12,22 @@ def _is_lmstudio_runtime(base_url: str) -> bool:
 
 class ChatGPTClient:
     """
-    Клиент для OpenAI API и совместимых сервисов (LM Studio, Ollama и др.)
+    LLM-клиент для обработки и саммаризации.
 
-    Поддерживает два режима:
-    - OpenAI SDK  — стандартный /v1/chat/completions  (OpenAI, Ollama, старые LM Studio)
-    - LM Studio Runtime API — /api/v1/chat  (новые версии LM Studio)
+    Провайдеры (self.provider):
+    - 'inference' — OpenAI-совместимый API:
+        * OpenAI SDK  — стандартный /v1/chat/completions  (OpenAI, Ollama, vLLM)
+        * LM Studio Runtime API — /api/v1/chat  (новые версии LM Studio)
+    - 'mdelta' — MDelta API (RAG-платформа): JWT-логин /api/auth/login,
+        диалог через /api/chat.
     """
     MAX_HISTORY_MESSAGES = 50
     _msg_counter = 0  # global monotonic ID for conversation history entries
 
     def __init__(self, api_key=None, model=CHATGPT_SETTINGS['default_model'],
                  max_tokens=CHATGPT_SETTINGS['max_tokens'],
-                 base_url=None):
+                 base_url=None, provider=None,
+                 mdelta_base_url=None, mdelta_username=None, mdelta_password=None):
 
         if base_url is None:
             base_url = CHATGPT_SETTINGS.get('api_base_url') or None
@@ -35,6 +39,7 @@ class ChatGPTClient:
         if not api_key:
             api_key = "local" if base_url else ""
 
+        self.provider = provider or CHATGPT_SETTINGS.get('provider', 'inference')
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
@@ -42,21 +47,32 @@ class ChatGPTClient:
         self.conversation_history = []
         self.system_prompt = CHATGPT_SETTINGS['system_prompt']
 
+        # MDelta API
+        self.mdelta_base_url = (mdelta_base_url if mdelta_base_url is not None
+                                else CHATGPT_SETTINGS.get('mdelta_base_url', ''))
+        self.mdelta_username = (mdelta_username if mdelta_username is not None
+                                else CHATGPT_SETTINGS.get('mdelta_username', ''))
+        self.mdelta_password = (mdelta_password if mdelta_password is not None
+                                else CHATGPT_SETTINGS.get('mdelta_password', ''))
+        self._mdelta_token = None
+        self._mdelta_session_id = None
+
         self._lmstudio_runtime = _is_lmstudio_runtime(base_url)
 
-        if not self._lmstudio_runtime and api_key:
+        if self.provider != 'mdelta' and not self._lmstudio_runtime and api_key:
             from openai import OpenAI
             client_kwargs = {'api_key': api_key}
             if base_url:
                 client_kwargs['base_url'] = base_url
             self.client = OpenAI(**client_kwargs)
         else:
-            self.client = None  # LM Studio Runtime или API не настроен
+            self.client = None  # MDelta / LM Studio Runtime / API не настроен
 
     def _reinit_client(self):
-        """Пересоздаёт OpenAI client после смены api_key или base_url."""
+        """Пересоздаёт OpenAI client после смены провайдера, api_key или base_url."""
         self._lmstudio_runtime = _is_lmstudio_runtime(self.base_url)
-        if self._lmstudio_runtime:
+        self._mdelta_token = None  # заставляем перелогиниться при смене настроек
+        if self.provider == 'mdelta' or self._lmstudio_runtime:
             self.client = None
             return
         effective_key = self.api_key or ('local' if self.base_url else '')
@@ -68,6 +84,90 @@ class ChatGPTClient:
         if self.base_url:
             kwargs['base_url'] = self.base_url
         self.client = OpenAI(**kwargs)
+
+    # ── MDelta API транспорт ───────────────────────────────────────────────────
+
+    def _mdelta_login(self) -> str:
+        """Логин в MDelta API, возвращает accessToken (JWT)."""
+        if not self.mdelta_base_url:
+            raise RuntimeError("Не указан URL MDelta API")
+        url = self.mdelta_base_url.rstrip('/') + '/api/auth/login'
+        resp = requests.post(url, json={
+            'username': self.mdelta_username,
+            'password': self.mdelta_password,
+        }, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        token = data.get('accessToken') or data.get('access_token') or data.get('token')
+        if not token:
+            raise RuntimeError(f"MDelta API не вернул accessToken: {list(data.keys())}")
+        self._mdelta_token = token
+        return token
+
+    def test_mdelta_connection(self) -> bool:
+        """Проверка подключения к MDelta API (логин). Бросает исключение при ошибке."""
+        self._mdelta_login()
+        return True
+
+    @property
+    def _mdelta_user_id(self) -> str:
+        """Стабильный userId для скоупинга диалога в MDelta."""
+        return f"mdelta-meetings-{self.mdelta_username or 'user'}"
+
+    def _chat_mdelta(self, messages, max_tokens):
+        """
+        Отправляет запрос через MDelta API (POST /api/chat).
+
+        MDelta принимает одно сообщение (message + userId), поэтому
+        system prompt и история диалога сворачиваются в текст запроса.
+        При 401 (протухший JWT) — один повторный логин.
+        """
+        system_msg = next((m['content'] for m in messages if m['role'] == 'system'), '')
+        history = [m for m in messages if m['role'] != 'system']
+
+        if len(history) == 1:
+            text = history[0]['content']
+        else:
+            parts = []
+            for m in history:
+                role = "User" if m['role'] == 'user' else "Assistant"
+                parts.append(f"{role}: {m['content']}")
+            text = "\n\n".join(parts)
+        if system_msg:
+            text = f"{system_msg}\n\n{text}"
+
+        if not self._mdelta_token:
+            self._mdelta_login()
+
+        url = self.mdelta_base_url.rstrip('/') + '/api/chat'
+        payload = {'message': text, 'userId': self._mdelta_user_id}
+        if self._mdelta_session_id:
+            payload['chatSessionId'] = self._mdelta_session_id
+
+        for attempt in (1, 2):
+            resp = requests.post(
+                url, json=payload,
+                headers={'Authorization': f'Bearer {self._mdelta_token}'},
+                timeout=180,
+            )
+            if resp.status_code == 401 and attempt == 1:
+                self._mdelta_login()
+                continue
+            break
+        resp.raise_for_status()
+        data = resp.json()
+
+        if isinstance(data, dict) and data.get('chatSessionId'):
+            self._mdelta_session_id = data['chatSessionId']
+
+        for key in ('response', 'answer', 'message', 'content', 'text', 'output'):
+            value = data.get(key) if isinstance(data, dict) else None
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if isinstance(data, dict) and data.get('choices'):
+            return data['choices'][0].get('message', {}).get('content', '') or ''
+        raise RuntimeError(f"Неожиданный формат ответа MDelta API: "
+                           f"{list(data.keys()) if isinstance(data, dict) else type(data)}")
 
     # ── Низкоуровневые методы отправки ────────────────────────────────────────
 
@@ -150,6 +250,8 @@ class ChatGPTClient:
         """Универсальный метод отправки — выбирает нужный транспорт."""
         if max_tokens is None:
             max_tokens = self.max_tokens
+        if self.provider == 'mdelta':
+            return self._chat_mdelta(messages, max_tokens)
         if self._lmstudio_runtime:
             return self._chat_lmstudio(messages, max_tokens)
         return self._chat_openai(messages, max_tokens)

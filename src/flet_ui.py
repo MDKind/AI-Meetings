@@ -4,7 +4,31 @@ import datetime
 import threading
 import time
 
-from utils.config import UI_SETTINGS, CHATGPT_SETTINGS
+from utils.config import UI_SETTINGS, CHATGPT_SETTINGS, SPEECH_RECOGNITION, MDELTA_THEME
+
+# Дизайн-токены MDelta (см. utils/config.py)
+_C_PRIMARY = MDELTA_THEME['primary']
+_C_BG = MDELTA_THEME['bg_layout']
+_C_CARD = MDELTA_THEME['bg_container']
+_C_BORDER = MDELTA_THEME['border']
+_C_TEXT = MDELTA_THEME['text']
+_C_TEXT2 = MDELTA_THEME['text_secondary']
+_C_ERROR = MDELTA_THEME['error']
+_C_SUCCESS = MDELTA_THEME['success']
+_RADIUS = MDELTA_THEME['radius']
+
+
+def _find_asset(filename: str):
+    """Ищет файл ассета: в PyInstaller bundle (_MEIPASS) или в installer/assets."""
+    import sys
+    candidates = []
+    if hasattr(sys, '_MEIPASS'):
+        candidates.append(os.path.join(sys._MEIPASS, filename))
+    candidates.append(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'installer', 'assets', filename,
+    ))
+    return next((p for p in candidates if os.path.exists(p)), None)
 
 
 def _apply_win32_icon(icon_path: str, window_title: str) -> None:
@@ -74,33 +98,24 @@ class FletAudioAssistantUI:
             except:
                 return "1.0.0"
 
-        def find_icon():
-            import sys
-            candidates = []
-            # PyInstaller one-file bundle: files extracted to sys._MEIPASS
-            if hasattr(sys, '_MEIPASS'):
-                candidates.append(os.path.join(sys._MEIPASS, 'icon.ico'))
-            # Dev mode: source tree
-            candidates.append(os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'installer', 'assets', 'icon.ico',
-            ))
-            return next((p for p in candidates if os.path.exists(p)), None)
-
         self.version = get_version()
         self.page.title = f"{UI_SETTINGS['window_title']} v{self.version}"
-        icon_path = find_icon()
+        icon_path = _find_asset('icon.ico')
         if icon_path:
             self.page.window.icon = icon_path
             _apply_win32_icon(icon_path, self.page.title)
-        self.page.theme_mode = ft.ThemeMode.DARK
+        self.logo_path = _find_asset('logo.png')
+
+        # Светлая тема в дизайн-системе MDelta (Ant Design v5)
+        self.page.theme_mode = ft.ThemeMode.LIGHT
+        self.page.bgcolor = _C_BG
         self.page.window.width = UI_SETTINGS['window_width']
         self.page.window.height = UI_SETTINGS['window_height']
         self.page.padding = 0
         self.page.fonts = {
             "Inter": "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
         }
-        self.page.theme = ft.Theme(font_family="Inter")
+        self.page.theme = ft.Theme(font_family="Inter", color_scheme_seed=_C_PRIMARY)
 
         self.setup_ui()
         self.refresh_devices()
@@ -156,7 +171,7 @@ class FletAudioAssistantUI:
             # Update UI
             self.btn_record.icon = ft.icons.STOP_ROUNDED
             self.btn_record.text = "Остановить"
-            self.btn_record.bgcolor = ft.colors.RED_700
+            self.btn_record.bgcolor = _C_ERROR
             self.status_text.value = "Идёт запись..."
             self.pulse_ring.visible = True
             self.page.update()
@@ -173,7 +188,7 @@ class FletAudioAssistantUI:
 
         self.btn_record.icon = ft.icons.FIBER_MANUAL_RECORD_ROUNDED
         self.btn_record.text = "Запись"
-        self.btn_record.bgcolor = ft.colors.BLUE_700
+        self.btn_record.bgcolor = _C_PRIMARY
         self.status_text.value = "Запись остановлена"
         self.pulse_ring.visible = False
         self.page.update()
@@ -267,9 +282,10 @@ class FletAudioAssistantUI:
 
         msg = ft.Container(
             content=content_col,
-            bgcolor=ft.colors.SURFACE_VARIANT,
-            padding=10,
-            border_radius=8,
+            bgcolor='#E6F4FF' if is_local else _C_CARD,
+            border=ft.border.all(1, '#BAE0FF' if is_local else _C_BORDER),
+            padding=12,
+            border_radius=_RADIUS,
             margin=ft.margin.only(bottom=10, left=0 if is_local else 40, right=40 if is_local else 0)
         )
         self.transcript_view.controls.append(msg)
@@ -508,25 +524,90 @@ class FletAudioAssistantUI:
 
     def apply_api_settings(self, e=None):
         if not self.chatgpt_client: return
+
+        # ── LLM: Inference ИЛИ MDelta API ─────────────────────────────────────
+        provider = self.rg_llm.value or 'inference'
         api_key = self.tb_api_key.value.strip()
         base_url = self.tb_base_url.value.strip()
         model = self.dd_llm.value
 
-        self.chatgpt_client.base_url = base_url or None
+        client = self.chatgpt_client
+        client.provider = provider
+        client.base_url = base_url or None
         if api_key:
-            self.chatgpt_client.api_key = api_key
-        self.chatgpt_client.model = model
-        self.chatgpt_client._reinit_client()
+            client.api_key = api_key
+        client.model = model
+        client.mdelta_base_url = self.tb_mdelta_url.value.strip()
+        client.mdelta_username = self.tb_mdelta_user.value.strip()
+        client.mdelta_password = self.tb_mdelta_pass.value.strip()
+        client._reinit_client()
 
         self.postprocess_enabled = self.sw_postprocess.value
 
+        # ── STT: локально ИЛИ удалённый Whisper-сервер ────────────────────────
+        stt_mode = self.rg_stt.value or 'local'
+        stt_url = self.tb_stt_url.value.strip()
+        stt_key = self.tb_stt_key.value.strip()
+        stt_model = self.dd_stt_model.value or 'whisper-1'
+        self._apply_stt_source(stt_mode, stt_url, stt_key, stt_model)
+
         if self.env_path:
-            self._save_env(api_key, base_url, model)
+            self._save_env(api_key, base_url, model, extra={
+                'LLM_PROVIDER': provider,
+                'MDELTA_API_URL': client.mdelta_base_url,
+                'MDELTA_USERNAME': client.mdelta_username,
+                'MDELTA_PASSWORD': client.mdelta_password,
+                'WHISPER_MODE': stt_mode,
+                'WHISPER_REMOTE_URL': stt_url,
+                'WHISPER_REMOTE_KEY': stt_key,
+                'WHISPER_REMOTE_MODEL': stt_model,
+            })
 
-        self.show_snack("Настройки применены", ft.colors.GREEN_600)
+        self.show_snack("Настройки применены", _C_SUCCESS)
 
-    def _save_env(self, api_key: str, base_url: str, model: str, whisper_model: str = None):
-        """Сохраняет настройки в .env файл."""
+    def _apply_stt_source(self, mode: str, url: str, key: str, model: str):
+        """Асинхронно переключает источник распознавания речи (backend может грузиться долго)."""
+        if not self.speech_recognizer:
+            return
+        rec = self.speech_recognizer
+        current_mode = getattr(rec, 'mode', 'local')
+        if mode == current_mode and (
+            mode == 'local' or (
+                url == getattr(rec, 'remote_base_url', '')
+                and key == getattr(rec, 'remote_api_key', '')
+                and model == getattr(rec, 'remote_model', '')
+            )
+        ):
+            self._update_stt_ui_state()
+            return
+
+        self.btn_record.disabled = True
+        self.status_text.value = "Переключение источника распознавания..."
+        self.page.update()
+
+        def _do():
+            try:
+                rec.configure_source(mode, url, key, model)
+                self.status_text.value = f"STT: {rec.active_backend_name}"
+            except Exception as ex:
+                self.status_text.value = "Ошибка переключения STT"
+                self.show_snack(f"Ошибка STT: {ex}", _C_ERROR)
+            finally:
+                self.btn_record.disabled = False
+                self._update_stt_ui_state()
+                self.page.update()
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _update_stt_ui_state(self):
+        """Локальный выбор модели Whisper в сайдбаре активен только в режиме local."""
+        remote = getattr(self.speech_recognizer, 'mode', 'local') == 'remote' \
+            if self.speech_recognizer else False
+        self.dd_whisper.disabled = remote
+
+    def _save_env(self, api_key: str, base_url: str, model: str,
+                  whisper_model: str = None, extra: dict = None):
+        """Сохраняет настройки в .env файл. extra — дополнительные пары KEY=value."""
         import re
         try:
             try:
@@ -553,6 +634,9 @@ class FletAudioAssistantUI:
                 lines = set_var(lines, 'CHATGPT_MODEL', model)
             if whisper_model:
                 lines = set_var(lines, 'WHISPER_MODEL', whisper_model)
+            for key, value in (extra or {}).items():
+                if value:
+                    lines = set_var(lines, key, value)
 
             os.makedirs(os.path.dirname(self.env_path), exist_ok=True)
             with open(self.env_path, 'w', encoding='utf-8') as f:
@@ -562,15 +646,100 @@ class FletAudioAssistantUI:
 
     def _open_settings(self, e=None):
         if self.chatgpt_client:
-            key = self.chatgpt_client.api_key or ''
+            client = self.chatgpt_client
+            key = client.api_key or ''
             if key == 'local':
                 key = ''
             self.tb_api_key.value = key
-            self.tb_base_url.value = self.chatgpt_client.base_url or ''
-            self.dd_llm.value = self.chatgpt_client.model
+            self.tb_base_url.value = client.base_url or ''
+            # Текущая модель может отсутствовать в списке (задана через .env) —
+            # добавляем её в options, иначе Dropdown отобразится пустым
+            if client.model and client.model not in [o.key for o in self.dd_llm.options]:
+                self.dd_llm.options.append(ft.dropdown.Option(client.model))
+            self.dd_llm.value = client.model
+            self.rg_llm.value = getattr(client, 'provider', 'inference')
+            self.tb_mdelta_url.value = getattr(client, 'mdelta_base_url', '') or ''
+            self.tb_mdelta_user.value = getattr(client, 'mdelta_username', '') or ''
+            self.tb_mdelta_pass.value = getattr(client, 'mdelta_password', '') or ''
+        if self.speech_recognizer:
+            rec = self.speech_recognizer
+            self.rg_stt.value = getattr(rec, 'mode', 'local')
+            self.tb_stt_url.value = getattr(rec, 'remote_base_url', '') or ''
+            self.tb_stt_key.value = getattr(rec, 'remote_api_key', '') or ''
+            remote_model = getattr(rec, 'remote_model', 'whisper-1') or 'whisper-1'
+            self._set_stt_model_options([remote_model])
+            self.dd_stt_model.value = remote_model
         self.sw_postprocess.value = self.postprocess_enabled
+        self._toggle_provider_fields()
+        self._toggle_stt_fields()
         self.settings_dlg.open = True
         self.page.update()
+
+    def _set_stt_model_options(self, models: list):
+        current = self.dd_stt_model.value
+        opts = list(dict.fromkeys((models or []) + ([current] if current else [])))
+        self.dd_stt_model.options = [ft.dropdown.Option(m) for m in opts]
+
+    def _toggle_provider_fields(self, e=None):
+        is_mdelta = (self.rg_llm.value == 'mdelta')
+        self.inference_fields.visible = not is_mdelta
+        self.mdelta_fields.visible = is_mdelta
+        if e is not None:
+            self.page.update()
+
+    def _toggle_stt_fields(self, e=None):
+        self.remote_stt_fields.visible = (self.rg_stt.value == 'remote')
+        if e is not None:
+            self.page.update()
+
+    def _fetch_stt_models(self, e=None):
+        """Загружает список моделей с удалённого Whisper-сервера (GET /models)."""
+        base_url = self.tb_stt_url.value.strip()
+        api_key = self.tb_stt_key.value.strip()
+        if not base_url:
+            self.show_snack("Укажите URL Whisper-сервера", _C_ERROR)
+            return
+
+        def _do():
+            try:
+                from src.speech_recognition import fetch_remote_whisper_models
+                models = fetch_remote_whisper_models(base_url, api_key)
+                if models:
+                    self._set_stt_model_options(models)
+                    if self.dd_stt_model.value not in models:
+                        self.dd_stt_model.value = models[0]
+                    self.page.update()
+                    self.show_snack(f"Загружено {len(models)} моделей", _C_SUCCESS)
+                else:
+                    self.show_snack("Сервер не вернул список моделей", _C_ERROR)
+            except Exception as ex:
+                self.show_snack(f"Ошибка загрузки моделей: {ex}", _C_ERROR)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _test_mdelta_connection(self, e=None):
+        """Проверяет подключение к MDelta API (логин по JWT)."""
+        if not self.chatgpt_client:
+            return
+        url = self.tb_mdelta_url.value.strip()
+        user = self.tb_mdelta_user.value.strip()
+        pwd = self.tb_mdelta_pass.value.strip()
+        if not url or not user:
+            self.show_snack("Укажите URL и логин MDelta", _C_ERROR)
+            return
+
+        def _do():
+            client = self.chatgpt_client
+            prev = (client.mdelta_base_url, client.mdelta_username, client.mdelta_password)
+            try:
+                client.mdelta_base_url, client.mdelta_username, client.mdelta_password = url, user, pwd
+                client.test_mdelta_connection()
+                self.show_snack("Подключение к MDelta API успешно", _C_SUCCESS)
+            except Exception as ex:
+                client.mdelta_base_url, client.mdelta_username, client.mdelta_password = prev
+                self.show_snack(f"Ошибка подключения к MDelta: {ex}", _C_ERROR)
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def _fetch_llm_models(self, e=None):
         if not self.chatgpt_client: return
@@ -618,20 +787,89 @@ class FletAudioAssistantUI:
         threading.Thread(target=_do, daemon=True).start()
 
     def setup_ui(self):
-        # Top App Bar
+        # ── Top App Bar: логотип-дельта + MDelta Meetings ─────────────────────
+        logo_ctrl = (
+            ft.Image(src=self.logo_path, width=28, height=28)
+            if self.logo_path
+            else ft.Icon(ft.icons.CHANGE_HISTORY_ROUNDED, color=_C_PRIMARY, size=28)
+        )
         self.page.appbar = ft.AppBar(
-            title=ft.Text(f"AI Meetings v{self.version}", weight=ft.FontWeight.BOLD),
+            leading=ft.Container(content=logo_ctrl, padding=ft.padding.only(left=16)),
+            leading_width=48,
+            title=ft.Row([
+                ft.Text("MDelta", size=18, weight=ft.FontWeight.BOLD, color=_C_TEXT),
+                ft.Text("Meetings", size=18, color=_C_TEXT),
+                ft.Container(
+                    content=ft.Text(f"v{self.version}", size=11, color=_C_TEXT2),
+                    bgcolor=_C_BG,
+                    border_radius=4,
+                    padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                    margin=ft.margin.only(left=4),
+                ),
+            ], spacing=5),
             center_title=False,
-            bgcolor=ft.colors.SURFACE_VARIANT,
+            bgcolor=_C_CARD,
+            elevation=0,
             actions=[
-                ft.IconButton(ft.icons.SETTINGS, on_click=self._open_settings),
+                ft.IconButton(ft.icons.SETTINGS_OUTLINED, icon_color=_C_TEXT2,
+                              tooltip="Настройки", on_click=self._open_settings),
                 ft.Container(width=10)
             ]
         )
 
-        # Settings Dialog
-        self.tb_api_key = ft.TextField(label="API Key (OpenAI)", password=True, can_reveal_password=True)
-        self.tb_base_url = ft.TextField(label="Base URL (пусто = OpenAI; LM Studio: http://127.0.0.1:1234/v1)")
+        # ── Диалог настроек ───────────────────────────────────────────────────
+        def section_title(text):
+            return ft.Text(text, size=13, weight=ft.FontWeight.BOLD, color=_C_TEXT)
+
+        # — Секция: распознавание речи (Whisper) —
+        self.rg_stt = ft.RadioGroup(
+            value=SPEECH_RECOGNITION.get('mode', 'local'),
+            on_change=self._toggle_stt_fields,
+            content=ft.Column([
+                ft.Radio(value="local", label="Локальная модель (WhisperNet / faster-whisper)"),
+                ft.Radio(value="remote", label="Удалённый сервер (LM Studio / OpenAI-совместимый)"),
+            ], spacing=0, tight=True),
+        )
+        self.tb_stt_url = ft.TextField(
+            label="URL Whisper-сервера",
+            hint_text="http://127.0.0.1:1234/v1 (LM Studio) или http://server:8000/v1",
+            dense=True,
+        )
+        self.tb_stt_key = ft.TextField(label="API Key (если требуется)", password=True,
+                                       can_reveal_password=True, dense=True)
+        self.dd_stt_model = ft.Dropdown(
+            label="Модель на сервере",
+            options=[ft.dropdown.Option(SPEECH_RECOGNITION.get('remote_model', 'whisper-1'))],
+            value=SPEECH_RECOGNITION.get('remote_model', 'whisper-1'),
+            expand=True, dense=True,
+        )
+        self.remote_stt_fields = ft.Column([
+            self.tb_stt_url,
+            self.tb_stt_key,
+            ft.Row([
+                self.dd_stt_model,
+                ft.IconButton(ft.icons.SYNC, tooltip="Загрузить список моделей с сервера",
+                              on_click=self._fetch_stt_models),
+            ], vertical_alignment=ft.CrossAxisAlignment.END),
+        ], tight=True, spacing=8, visible=SPEECH_RECOGNITION.get('mode') == 'remote')
+
+        # — Секция: LLM-провайдер (Inference ИЛИ MDelta API) —
+        self.rg_llm = ft.RadioGroup(
+            value=CHATGPT_SETTINGS.get('provider', 'inference'),
+            on_change=self._toggle_provider_fields,
+            content=ft.Column([
+                ft.Radio(value="inference", label="Inference (OpenAI / LM Studio / Ollama)"),
+                ft.Radio(value="mdelta", label="MDelta API"),
+            ], spacing=0, tight=True),
+        )
+
+        self.tb_api_key = ft.TextField(label="API Key (OpenAI)", password=True,
+                                       can_reveal_password=True, dense=True)
+        self.tb_base_url = ft.TextField(
+            label="Base URL",
+            hint_text="пусто = OpenAI; LM Studio: http://127.0.0.1:1234/v1",
+            dense=True,
+        )
         self.dd_llm = ft.Dropdown(
             label="LLM Model",
             options=[
@@ -640,36 +878,63 @@ class FletAudioAssistantUI:
                 ft.dropdown.Option("gpt-3.5-turbo"),
             ],
             value=CHATGPT_SETTINGS.get('default_model', 'gpt-4o'),
-            expand=True,
+            expand=True, dense=True,
         )
+        self.inference_fields = ft.Column([
+            self.tb_api_key,
+            self.tb_base_url,
+            ft.Row([
+                self.dd_llm,
+                ft.IconButton(ft.icons.SYNC, tooltip="Загрузить список моделей с сервера",
+                              on_click=self._fetch_llm_models),
+            ], vertical_alignment=ft.CrossAxisAlignment.END),
+        ], tight=True, spacing=8,
+            visible=CHATGPT_SETTINGS.get('provider', 'inference') != 'mdelta')
+
+        self.tb_mdelta_url = ft.TextField(
+            label="URL MDelta API",
+            hint_text="https://mdrag.example.com",
+            dense=True,
+        )
+        self.tb_mdelta_user = ft.TextField(label="Логин", dense=True)
+        self.tb_mdelta_pass = ft.TextField(label="Пароль", password=True,
+                                           can_reveal_password=True, dense=True)
+        self.mdelta_fields = ft.Column([
+            self.tb_mdelta_url,
+            self.tb_mdelta_user,
+            self.tb_mdelta_pass,
+            ft.TextButton("Проверить подключение", icon=ft.icons.WIFI_TETHERING,
+                          on_click=self._test_mdelta_connection),
+        ], tight=True, spacing=8,
+            visible=CHATGPT_SETTINGS.get('provider', 'inference') == 'mdelta')
+
         self.sw_postprocess = ft.Switch(
             label="LLM-улучшение качества",
             value=False,
+            active_color=_C_PRIMARY,
             tooltip="Улучшать каждый фрагмент транскрипта через LLM: исправляет ошибки распознавания, пунктуацию, делает текст связным. Добавляет задержку на каждый фрагмент.",
         )
 
         self.settings_dlg = ft.AlertDialog(
             title=ft.Text("Настройки"),
             content=ft.Container(
-                width=420,
+                width=460,
                 content=ft.Column([
-                    self.tb_api_key,
-                    self.tb_base_url,
-                    ft.Row([
-                        self.dd_llm,
-                        ft.IconButton(
-                            ft.icons.SYNC,
-                            tooltip="Загрузить список моделей с сервера",
-                            on_click=self._fetch_llm_models,
-                        ),
-                    ], vertical_alignment=ft.CrossAxisAlignment.END),
-                    ft.Divider(),
+                    section_title("Распознавание речи (Whisper)"),
+                    self.rg_stt,
+                    self.remote_stt_fields,
+                    ft.Divider(height=16),
+                    section_title("Обработка и саммаризация (LLM)"),
+                    self.rg_llm,
+                    self.inference_fields,
+                    self.mdelta_fields,
+                    ft.Divider(height=16),
                     self.sw_postprocess,
-                ], tight=True, spacing=8),
+                ], tight=True, spacing=8, scroll=ft.ScrollMode.AUTO, height=520),
             ),
             actions=[
                 ft.TextButton("Отмена", on_click=lambda e: [setattr(self.settings_dlg, 'open', False), self.page.update()]),
-                ft.TextButton("Применить", on_click=lambda e: [self.apply_api_settings(), setattr(self.settings_dlg, 'open', False), self.page.update()]),
+                ft.FilledButton("Применить", on_click=lambda e: [self.apply_api_settings(), setattr(self.settings_dlg, 'open', False), self.page.update()]),
             ],
         )
         self.page.overlay.append(self.settings_dlg)
@@ -683,7 +948,7 @@ class FletAudioAssistantUI:
 
         _cur_model = getattr(self.speech_recognizer, 'model_name', 'base') if self.speech_recognizer else 'base'
         self.dd_whisper = ft.Dropdown(
-            label="Модель Whisper",
+            label="Модель Whisper (локально)",
             options=[
                 ft.dropdown.Option(key="tiny", text="tiny (~75 MB, быстрая)"),
                 ft.dropdown.Option(key="base", text="base (~142 MB)"),
@@ -698,36 +963,50 @@ class FletAudioAssistantUI:
         )
 
         self.btn_record = ft.ElevatedButton(
-            icon=ft.icons.FIBER_MANUAL_RECORD_ROUNDED, 
+            icon=ft.icons.FIBER_MANUAL_RECORD_ROUNDED,
             text="Запись",
-            bgcolor=ft.colors.BLUE_700,
+            bgcolor=_C_PRIMARY,
             color=ft.colors.WHITE,
+            elevation=0,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=_RADIUS)),
             on_click=self.toggle_record,
-            width=150
+            width=160,
+            height=40,
         )
-        
-        self.pulse_ring = ft.ProgressRing(width=24, height=24, stroke_width=2, color=ft.colors.RED_400, visible=False)
-        self.status_text = ft.Text("Готов", size=12, color=ft.colors.ON_SURFACE_VARIANT)
+
+        self.pulse_ring = ft.ProgressRing(width=24, height=24, stroke_width=2, color=_C_ERROR, visible=False)
+        self.status_text = ft.Text("Готов", size=12, color=_C_TEXT2)
+
+        self._update_stt_ui_state()
 
         sidebar = ft.Container(
             width=280,
             padding=20,
-            bgcolor=ft.colors.SURFACE,
+            bgcolor=_C_CARD,
+            border=ft.border.only(right=ft.BorderSide(1, _C_BORDER)),
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
             content=ft.Column([
-                ft.Text("Устройства", weight=ft.FontWeight.BOLD),
+                ft.Text("Устройства", size=13, weight=ft.FontWeight.BOLD, color=_C_TEXT),
                 self.dd_input,
                 self.dd_output,
                 ft.TextButton("Обновить список", icon=ft.icons.REFRESH, on_click=self.refresh_devices),
-                ft.Divider(height=20),
-                ft.Text("Настройки", weight=ft.FontWeight.BOLD),
+                ft.Divider(height=20, color=_C_BORDER),
+                ft.Text("Распознавание", size=13, weight=ft.FontWeight.BOLD, color=_C_TEXT),
                 self.dd_language,
                 self.dd_whisper,
-                ft.Divider(height=20),
+                ft.Divider(height=20, color=_C_BORDER),
                 ft.Row([self.btn_record, self.pulse_ring], alignment=ft.MainAxisAlignment.START),
                 self.status_text,
                 ft.Container(expand=True),
-                ft.ElevatedButton("Очистить историю", icon=ft.icons.DELETE_SWEEP, on_click=self.clear_history, color=ft.colors.RED_300),
+                ft.OutlinedButton(
+                    "Очистить историю", icon=ft.icons.DELETE_SWEEP,
+                    on_click=self.clear_history,
+                    style=ft.ButtonStyle(
+                        color=_C_ERROR,
+                        shape=ft.RoundedRectangleBorder(radius=_RADIUS),
+                        side=ft.BorderSide(1, _C_ERROR),
+                    ),
+                ),
             ])
         )
 
@@ -740,12 +1019,16 @@ class FletAudioAssistantUI:
             text_size=13,
         )
         self.summary_text = ft.Markdown(selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB)
-        self.pr_summary = ft.ProgressBar(visible=False, color=ft.colors.BLUE_400)
+        self.pr_summary = ft.ProgressBar(visible=False, color=_C_PRIMARY)
 
         self.tabs = ft.Tabs(
             selected_index=0,
             animation_duration=300,
             expand=True,
+            label_color=_C_PRIMARY,
+            unselected_label_color=_C_TEXT2,
+            indicator_color=_C_PRIMARY,
+            divider_color=_C_BORDER,
             tabs=[
                 ft.Tab(
                     text="Транскрипт",
@@ -773,10 +1056,17 @@ class FletAudioAssistantUI:
                         padding=20,
                         content=ft.Column([
                             ft.Row([
-                                ft.ElevatedButton("Генерировать Саммари", icon=ft.icons.AUTO_AWESOME, on_click=self.generate_summary),
+                                ft.FilledButton(
+                                    "Генерировать Саммари", icon=ft.icons.AUTO_AWESOME,
+                                    on_click=self.generate_summary,
+                                    style=ft.ButtonStyle(
+                                        bgcolor=_C_PRIMARY,
+                                        shape=ft.RoundedRectangleBorder(radius=_RADIUS),
+                                    ),
+                                ),
                                 self.pr_summary
                             ]),
-                            ft.Divider(),
+                            ft.Divider(color=_C_BORDER),
                             ft.ListView([self.summary_text], expand=True)
                         ])
                     )
@@ -788,7 +1078,6 @@ class FletAudioAssistantUI:
         self.page.add(
             ft.Row([
                 sidebar,
-                ft.VerticalDivider(width=1),
-                ft.Container(content=self.tabs, expand=True, bgcolor=ft.colors.SURFACE)
-            ], expand=True)
+                ft.Container(content=self.tabs, expand=True, bgcolor=_C_BG)
+            ], spacing=0, expand=True)
         )

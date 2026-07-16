@@ -10,7 +10,7 @@ def isolate_env(tmp_path, monkeypatch):
 
 
 def _make_cached_model(tmp_path, model_name="base"):
-    model_dir = tmp_path / "AI Meetings" / "models" / f"faster-whisper-{model_name}"
+    model_dir = tmp_path / "MDelta Meetings" / "models" / f"faster-whisper-{model_name}"
     model_dir.mkdir(parents=True)
     return model_dir
 

@@ -1,4 +1,4 @@
-name: Build AI Meetings
+name: Build MDelta Meetings
 
 on:
   push:
@@ -97,7 +97,7 @@ jobs:
         path: data/whisper_service/
 
     - name: Build PyInstaller executable
-      run: python -m PyInstaller AI_Meetings.spec --clean
+      run: python -m PyInstaller MDelta_Meetings.spec --clean
 
     - name: Build Inno Setup installer
       run: |
@@ -107,6 +107,6 @@ jobs:
     - name: Upload installer artifact
       uses: actions/upload-artifact@v4
       with:
-        name: AI_Meetings_Installer
-        path: dist/AI_Meetings_Setup_v*.exe
+        name: MDelta_Meetings_Installer
+        path: dist/MDelta_Meetings_Setup_v*.exe
         retention-days: 7

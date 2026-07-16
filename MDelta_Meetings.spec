@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for AI Meetings
+# PyInstaller spec for MDelta Meetings
 # Build from repo root:
-#   build_venv\Scripts\python.exe -m PyInstaller AI_Meetings.spec --clean
+#   build_venv\Scripts\python.exe -m PyInstaller MDelta_Meetings.spec --clean
 
 import sys
 import os
@@ -37,6 +37,7 @@ sv_datas = []
 all_datas = ct2_datas + sd_datas + sv_datas + sherpa_datas + [
     ('version.txt', '.'),
     ('installer/assets/icon.ico', '.'),
+    ('installer/assets/logo.png', '.'),
 ]
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
@@ -101,7 +102,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='AI_Meetings',
+    name='MDelta_Meetings',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
