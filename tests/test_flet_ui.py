@@ -99,21 +99,31 @@ class TestSaveEnv:
         ui._save_env("sk-key", "", "gpt-4o")
         assert nested.exists()
 
-    def test_apply_api_settings_no_language_attr_set(self, tmp_path):
-        """speech_recognizer.language must NOT be set — dead code was removed."""
-        ui = _make_ui(tmp_path)
-        speech_mock = ui.speech_recognizer
+    def test_language_passed_as_kwarg_not_attribute(self, tmp_path):
+        """Язык передаётся параметром transcribe_audio_data, а не атрибутом .language."""
+        import time as _time
 
+        class _Rec:
+            is_ready = True
+
+            def transcribe_audio_data(self, frames, language=None):
+                self.last_language = language
+                return ""
+
+        ui = _make_ui(tmp_path)
+        rec = _Rec()
+        ui.speech_recognizer = rec
         ui.dd_language = MagicMock()
         ui.dd_language.value = "en"
         ui.dd_llm = MagicMock()
         ui.dd_llm.value = "gpt-4o"
 
         ui.start_recording()
+        _time.sleep(0.3)
+        ui.stop_recording()
 
-        assert not hasattr(speech_mock, 'language') or \
-               not speech_mock.method_calls or \
-               all('language' not in str(c) for c in speech_mock.method_calls)
+        # UI не должен присваивать recognizer.language напрямую (мёртвый API)
+        assert not hasattr(rec, 'language')
 
 
 # ── _apply_diarization ────────────────────────────────────────────────────────
@@ -446,15 +456,13 @@ class TestDeviceDropdownLayout:
 
         ui.refresh_devices()
 
-        opt = ui.dd_input.options[0]
+        # options[0] — «Устройство по умолчанию (ОС)», устройства со второго
+        opt = ui.dd_input.options[1]
         assert opt.key == "1"
         assert len(opt.text) <= FletAudioAssistantUI._DEVICE_LABEL_MAX
         assert opt.text.endswith("…")
-        # value = только индекс — парсинг int(value.split(':')[0]) работает
-        assert ui.dd_input.value == "1"
-        assert int(ui.dd_input.value.split(":")[0]) == 1
 
-    def test_default_device_selected_by_key(self, tmp_path):
+    def test_os_default_device_option_first_and_preselected(self, tmp_path):
         ui = _make_ui(tmp_path)
         ui.audio_capture.list_input_devices.return_value = [
             (0, "Другой микрофон", "microphone"),
@@ -462,7 +470,29 @@ class TestDeviceDropdownLayout:
         ]
         ui.audio_capture.list_output_devices.return_value = []
         ui.refresh_devices()
+        # Первым в списке — «Устройство по умолчанию (ОС)», оно же выбрано
+        assert ui.dd_input.options[0].key == FletAudioAssistantUI.DEFAULT_DEVICE_KEY
+        assert ui.dd_input.value == FletAudioAssistantUI.DEFAULT_DEVICE_KEY
+        assert ui.dd_output.options[0].key == FletAudioAssistantUI.DEFAULT_DEVICE_KEY
+
+    def test_user_device_selection_survives_refresh(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.audio_capture.list_input_devices.return_value = [
+            (0, "Другой микрофон", "microphone"),
+            (3, "Основной", "microphone"),
+        ]
+        ui.audio_capture.list_output_devices.return_value = []
+        ui.dd_input.value = "3"
+        ui.refresh_devices()
         assert ui.dd_input.value == "3"
+
+    def test_parse_device_index(self):
+        parse = FletAudioAssistantUI._parse_device_index
+        assert parse(FletAudioAssistantUI.DEFAULT_DEVICE_KEY) is None
+        assert parse("") is None
+        assert parse(None) is None
+        assert parse("3") == 3
+        assert parse("3: Микрофон гарнитуры") == 3
 
     def test_settings_dialog_height_adapts(self, tmp_path):
         ui = _make_ui(tmp_path)
@@ -527,3 +557,82 @@ class TestRemoteSttSidebarBadge:
         content = (tmp_path / ".env").read_text()
         assert "WHISPER_REMOTE_MODEL=whisper-1" in content
         assert "(модель" not in content
+
+
+# ── Копирование транскрипта и саммари ─────────────────────────────────────────
+
+class TestCopyButtons:
+
+    def _ui_with_entries(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        for speaker, text, ts in [("Я", "первая реплика", "10:00:01"),
+                                  ("Собеседник 1", "вторая реплика", "10:00:05")]:
+            ui._transcript_entries.append({
+                "speaker_ctrl": ft.Text(speaker),
+                "text_ctrl": ft.Text(text),
+                "ts": ts,
+            })
+        return ui
+
+    def test_copy_transcript_uses_current_labels(self, tmp_path):
+        ui = self._ui_with_entries(tmp_path)
+        ui._copy_transcript()
+        copied = ui.page.set_clipboard.call_args.args[0]
+        assert "[10:00:01] Я: первая реплика" in copied
+        assert "[10:00:05] Собеседник 1: вторая реплика" in copied
+
+    def test_copy_empty_transcript_shows_warning(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui._copy_transcript()
+        ui.page.set_clipboard.assert_not_called()
+
+    def test_copy_summary(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.summary_text.value = "## Саммари\n- пункт"
+        ui._copy_summary()
+        assert ui.page.set_clipboard.call_args.args[0] == "## Саммари\n- пункт"
+
+    def test_copy_empty_summary_shows_warning(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        ui.summary_text.value = ""
+        ui._copy_summary()
+        ui.page.set_clipboard.assert_not_called()
+
+
+# ── Диаризация собеседников (системный звук) ─────────────────────────────────
+
+class TestRemoteDiarization:
+
+    def test_apply_diarization_remote_prefix(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        entries = [_make_entry(1.0), _make_entry(6.0)]
+        segments = [DiarSegment(0, 0.0, 4.0), DiarSegment(1, 4.0, 9.0)]
+
+        ui._apply_diarization(segments, entries, prefix="Собеседник",
+                              single_label="Собеседник",
+                              palette=ui._DIAR_COLORS_REMOTE,
+                              single_color=ft.colors.GREEN_400)
+
+        assert entries[0]["speaker_ctrl"].value == "Собеседник 1"
+        assert entries[1]["speaker_ctrl"].value == "Собеседник 2"
+
+    def test_apply_diarization_remote_single_speaker(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        entries = [_make_entry(1.0), _make_entry(2.0)]
+        segments = [DiarSegment(0, 0.0, 5.0)]
+
+        ui._apply_diarization(segments, entries, prefix="Собеседник",
+                              single_label="Собеседник",
+                              palette=ui._DIAR_COLORS_REMOTE,
+                              single_color=ft.colors.GREEN_400)
+
+        assert entries[0]["speaker_ctrl"].value == "Собеседник"
+        assert entries[1]["speaker_ctrl"].value == "Собеседник"
+
+    def test_default_prefix_keeps_local_behavior(self, tmp_path):
+        ui = _make_ui(tmp_path)
+        entries = [_make_entry(1.0), _make_entry(6.0)]
+        segments = [DiarSegment(0, 0.0, 4.0), DiarSegment(1, 4.0, 9.0)]
+        ui._apply_diarization(segments, entries)
+        assert entries[0]["speaker_ctrl"].value == "Участник 1"
+        assert entries[1]["speaker_ctrl"].value == "Участник 2"

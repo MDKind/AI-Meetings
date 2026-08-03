@@ -187,13 +187,23 @@ class SystemAudioCapture:
         """
         Выбирает loopback устройство соответствующее preferred_output_index.
 
-        Алгоритм: имена устройств могут быть в сломанной кодировке, поэтому
-        не полагаемся на сравнение строк. Вместо этого:
+        preferred_output_index=None означает «устройство по умолчанию ОС» —
+        используем get_default_wasapi_loopback() из pyaudiowpatch (следует
+        за системным default output), с fallback на первый loopback.
+
+        Алгоритм для конкретного устройства: имена могут быть в сломанной
+        кодировке, поэтому не полагаемся на сравнение строк. Вместо этого:
         1. Находим positional rank preferred_output_index среди WASAPI output устройств.
         2. Берём loopback с тем же rank (они идут в одном порядке).
         """
         if preferred_output_index is None:
-            return loopbacks[0]
+            try:
+                default_lb = p.get_default_wasapi_loopback()
+                print(f"[SystemAudio] Default loopback ОС: {default_lb['name']}")
+                return default_lb
+            except Exception as e:
+                print(f"[SystemAudio] get_default_wasapi_loopback недоступен ({e}), берём первый")
+                return loopbacks[0]
 
         try:
             # Получаем список всех WASAPI output устройств в порядке индексов
@@ -264,7 +274,11 @@ class SystemAudioCapture:
                     return preferred_output_index
             except Exception:
                 pass
-        return None
+        # fallback для «устройства по умолчанию»: системный default output
+        try:
+            return p.get_default_output_device_info()['index']
+        except Exception:
+            return None
 
     def _write_silence(self, channels: int):
         """Пишет нули в output stream чтобы WASAPI render clock работал."""

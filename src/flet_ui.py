@@ -136,24 +136,42 @@ class FletAudioAssistantUI:
             label = label[:cls._DEVICE_LABEL_MAX - 1] + "…"
         return ft.dropdown.Option(key=str(idx), text=label)
 
+    # Специальное значение «устройство по умолчанию ОС» — следует за
+    # выбором в настройках Windows, а не за конкретным устройством
+    DEFAULT_DEVICE_KEY = "default"
+    _DEFAULT_DEVICE_LABEL = "Устройство по умолчанию (ОС)"
+
     def refresh_devices(self, e=None):
         if not self.audio_capture: return
         input_devices = self.audio_capture.list_input_devices()
         output_devices = self.audio_capture.list_output_devices()
 
-        self.dd_input.options = [self._device_option(idx, name) for idx, name, _ in input_devices]
-        self.dd_output.options = [self._device_option(idx, name) for idx, name, _ in output_devices]
+        default_opt = ft.dropdown.Option(
+            key=self.DEFAULT_DEVICE_KEY, text=self._DEFAULT_DEVICE_LABEL)
 
-        default_in = next((str(idx) for idx, name, _ in input_devices if "[по умолчанию]" in name), None)
-        default_out = next((str(idx) for idx, name, _ in output_devices if "[по умолчанию]" in name), None)
+        self.dd_input.options = [default_opt] + \
+            [self._device_option(idx, name) for idx, name, _ in input_devices]
+        self.dd_output.options = [ft.dropdown.Option(
+            key=self.DEFAULT_DEVICE_KEY, text=self._DEFAULT_DEVICE_LABEL)] + \
+            [self._device_option(idx, name) for idx, name, _ in output_devices]
 
-        if default_in: self.dd_input.value = default_in
-        elif input_devices: self.dd_input.value = str(input_devices[0][0])
-
-        if default_out: self.dd_output.value = default_out
-        elif output_devices: self.dd_output.value = str(output_devices[0][0])
+        # Сохраняем выбор пользователя между обновлениями списка;
+        # по умолчанию — «Устройство по умолчанию (ОС)»
+        in_keys = {o.key for o in self.dd_input.options}
+        out_keys = {o.key for o in self.dd_output.options}
+        if self.dd_input.value not in in_keys:
+            self.dd_input.value = self.DEFAULT_DEVICE_KEY
+        if self.dd_output.value not in out_keys:
+            self.dd_output.value = self.DEFAULT_DEVICE_KEY
 
         self.page.update()
+
+    @classmethod
+    def _parse_device_index(cls, value):
+        """'default'/пусто → None (устройство по умолчанию ОС), иначе int-индекс."""
+        if value in (None, '', cls.DEFAULT_DEVICE_KEY):
+            return None
+        return int(str(value).split(":")[0])
 
     def start_recording(self):
         if not self.audio_capture or not self.speech_recognizer:
@@ -161,8 +179,8 @@ class FletAudioAssistantUI:
             return
 
         try:
-            in_idx = int(self.dd_input.value.split(":")[0])
-            out_idx = int(self.dd_output.value.split(":")[0])
+            in_idx = self._parse_device_index(self.dd_input.value)
+            out_idx = self._parse_device_index(self.dd_output.value)
         except Exception:
             self.show_snack("Ошибка выбора устройств", ft.colors.RED_400)
             return
@@ -307,8 +325,10 @@ class FletAudioAssistantUI:
         if self.chatgpt_client:
             msg_id = self.chatgpt_client.add_message(f"[{speaker_name}]: {text}", role="user")
 
+        # Смещение от начала сессии — нужно для диаризации обеих дорожек
+        # (mic → Участник N, системный звук → Собеседник N)
         start_offset = None
-        if is_local and start_time is not None and self.audio_capture and self.audio_capture.session_start:
+        if start_time is not None and self.audio_capture and self.audio_capture.session_start:
             start_offset = max(0.0, (start_time - self.audio_capture.session_start).total_seconds())
 
         speaker_ctrl = ft.Text(speaker_name, color=color, size=12, weight=ft.FontWeight.BOLD)
@@ -319,6 +339,7 @@ class FletAudioAssistantUI:
             "speaker_raw": speaker,
             "speaker_ctrl": speaker_ctrl,
             "msg_id": msg_id,
+            "ts": ts,
         }
 
         edit_btn = ft.IconButton(
@@ -397,7 +418,14 @@ class FletAudioAssistantUI:
         self.status_text.value = "История очищена"
         self.page.update()
 
+    _MIN_DIAR_PCM = 2 * 16000 * 2  # минимум 2 секунды int16
+
     def _try_diarize(self):
+        """Диаризация обеих дорожек по окончании записи.
+
+        mic ("Я")            → «Участник 1/2/…» если говоривших несколько
+        системный звук       → «Собеседник 1/2/…» если собеседников несколько
+        """
         try:
             from src import diarization as diar
         except ImportError:
@@ -406,11 +434,21 @@ class FletAudioAssistantUI:
             return
         if not self.audio_capture:
             return
-        pcm = self.audio_capture.session_pcm
-        if len(pcm) < 2 * 16000 * 2:
-            return
-        entries_snapshot = [e for e in self._transcript_entries if e["speaker_raw"] == "local"]
-        if not entries_snapshot:
+
+        tasks = []
+        pcm_local = self.audio_capture.session_pcm
+        local_entries = [e for e in self._transcript_entries if e["speaker_raw"] == "local"]
+        if len(pcm_local) >= self._MIN_DIAR_PCM and local_entries:
+            tasks.append((pcm_local, local_entries, "Участник", "Я",
+                          self._DIAR_COLORS, ft.colors.BLUE_400))
+
+        pcm_sys = getattr(self.audio_capture, 'session_sys_pcm', b'')
+        remote_entries = [e for e in self._transcript_entries if e["speaker_raw"] == "remote"]
+        if len(pcm_sys) >= self._MIN_DIAR_PCM and remote_entries:
+            tasks.append((pcm_sys, remote_entries, "Собеседник", "Собеседник",
+                          self._DIAR_COLORS_REMOTE, ft.colors.GREEN_400))
+
+        if not tasks:
             return
 
         def _run():
@@ -418,11 +456,15 @@ class FletAudioAssistantUI:
                 def status_cb(msg):
                     self.status_text.value = msg
                     self.page.update()
-                status_cb("Диаризация...")
-                segments = diar.diarize(pcm, status_cb=status_cb)
-                self._apply_diarization(segments, entries_snapshot)
-            except Exception as e:
-                print(f"[Diarization] Ошибка: {e}")
+                for pcm, entries, prefix, single, palette, single_color in tasks:
+                    status_cb(f"Диаризация ({prefix.lower()})...")
+                    try:
+                        segments = diar.diarize(pcm, status_cb=status_cb)
+                        self._apply_diarization(segments, entries, prefix=prefix,
+                                                single_label=single, palette=palette,
+                                                single_color=single_color)
+                    except Exception as e:
+                        print(f"[Diarization] Ошибка ({prefix}): {e}")
             finally:
                 self.status_text.value = "Запись остановлена"
                 self.page.update()
@@ -436,7 +478,24 @@ class FletAudioAssistantUI:
         ft.colors.TEAL_400,
     ]
 
-    def _apply_diarization(self, segments, entries):
+    # Палитра для собеседников (системный звук) — отличается от палитры
+    # участников с микрофона, чтобы стороны разговора читались сразу
+    _DIAR_COLORS_REMOTE = [
+        ft.colors.GREEN_400,
+        ft.colors.CYAN_600,
+        ft.colors.LIME_700,
+        ft.colors.AMBER_600,
+    ]
+
+    def _apply_diarization(self, segments, entries, prefix="Участник",
+                           single_label="Я", palette=None, single_color=None):
+        """Перемаркирует entries по результатам диаризации.
+
+        prefix       — метка спикера с номером («Участник 2», «Собеседник 1»)
+        single_label — метка если обнаружен только один говорящий
+        """
+        palette = palette or self._DIAR_COLORS
+        single_color = single_color or ft.colors.BLUE_400
         speaker_map: dict = {}
 
         for entry in entries:
@@ -454,15 +513,15 @@ class FletAudioAssistantUI:
             sid = matched.speaker_id
             if sid not in speaker_map:
                 n = len(speaker_map) + 1
-                speaker_map[sid] = (f"Участник {n}", self._DIAR_COLORS[(n - 1) % len(self._DIAR_COLORS)])
+                speaker_map[sid] = (f"{prefix} {n}", palette[(n - 1) % len(palette)])
             label, color = speaker_map[sid]
             entry["speaker_ctrl"].value = label
             entry["speaker_ctrl"].color = color
 
         if len(speaker_map) <= 1:
             for entry in entries:
-                entry["speaker_ctrl"].value = "Я"
-                entry["speaker_ctrl"].color = ft.colors.BLUE_400
+                entry["speaker_ctrl"].value = single_label
+                entry["speaker_ctrl"].color = single_color
 
         self.page.update()
 
@@ -591,6 +650,39 @@ class FletAudioAssistantUI:
         self.page.snack_bar = ft.SnackBar(ft.Text(text), bgcolor=color)
         self.page.snack_bar.open = True
         self.page.update()
+
+    # ── Копирование транскрипта и саммари ─────────────────────────────────────
+
+    def _transcript_as_text(self) -> str:
+        """Транскрипт в виде текста: [HH:MM:SS] Спикер: реплика.
+
+        Использует актуальные метки спикеров (после диаризации —
+        «Участник N» / «Собеседник N») и отредактированный текст.
+        """
+        lines = []
+        for entry in self._transcript_entries:
+            speaker = entry["speaker_ctrl"].value
+            text = entry["text_ctrl"].value if entry.get("text_ctrl") else ""
+            ts = entry.get("ts", "")
+            prefix = f"[{ts}] " if ts else ""
+            lines.append(f"{prefix}{speaker}: {text}")
+        return "\n".join(lines)
+
+    def _copy_transcript(self, e=None):
+        text = self._transcript_as_text()
+        if not text.strip():
+            self.show_snack("Транскрипт пуст", ft.colors.ORANGE_400)
+            return
+        self.page.set_clipboard(text)
+        self.show_snack("Транскрипт скопирован в буфер обмена", _C_SUCCESS)
+
+    def _copy_summary(self, e=None):
+        text = (self.summary_text.value or "").strip()
+        if not text:
+            self.show_snack("Саммари ещё не сгенерировано", ft.colors.ORANGE_400)
+            return
+        self.page.set_clipboard(text)
+        self.show_snack("Саммари скопировано в буфер обмена", _C_SUCCESS)
 
     def apply_api_settings(self, e=None):
         if not self.chatgpt_client: return
@@ -1174,6 +1266,12 @@ class FletAudioAssistantUI:
                                     tooltip="Применить правку через LLM ко всему транскрипту",
                                     on_click=lambda e: self._apply_global_correction(),
                                 ),
+                                ft.IconButton(
+                                    ft.icons.COPY_ROUNDED,
+                                    icon_color=_C_PRIMARY,
+                                    tooltip="Копировать весь транскрипт",
+                                    on_click=self._copy_transcript,
+                                ),
                             ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                         ])
                     )
@@ -1191,6 +1289,15 @@ class FletAudioAssistantUI:
                                     style=ft.ButtonStyle(
                                         bgcolor=_C_PRIMARY,
                                         shape=ft.RoundedRectangleBorder(radius=_RADIUS),
+                                    ),
+                                ),
+                                ft.OutlinedButton(
+                                    "Копировать", icon=ft.icons.COPY_ROUNDED,
+                                    on_click=self._copy_summary,
+                                    style=ft.ButtonStyle(
+                                        color=_C_PRIMARY,
+                                        shape=ft.RoundedRectangleBorder(radius=_RADIUS),
+                                        side=ft.BorderSide(1, _C_PRIMARY),
                                     ),
                                 ),
                                 self.pr_summary

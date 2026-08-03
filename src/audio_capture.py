@@ -64,6 +64,7 @@ class AudioCapture:
         self._sys_segment_start: datetime | None = None
 
         self._session_pcm: bytearray = bytearray()
+        self._session_sys_pcm: bytearray = bytearray()  # системный звук (для диаризации собеседников)
         self._session_start: datetime | None = None
 
         # Номер сессии записи: фоновые потоки старой сессии сравнивают его со
@@ -303,6 +304,7 @@ class AudioCapture:
             self._vad.reset()
 
         self._session_pcm = bytearray()
+        self._session_sys_pcm = bytearray()
         self._session_start = datetime.now()
 
         try:
@@ -449,6 +451,10 @@ class AudioCapture:
                 # Конвертируем в int16 для совместимости с остальным пайплайном
                 int_samples = (samples * 32767).astype(np.int16)
 
+                # Копим полный PCM системного звука — для диаризации
+                # собеседников по окончании записи
+                self._session_sys_pcm.extend(int_samples.tobytes())
+
                 # Разбиваем на chunk_size кусочки для корректной работы VAD
                 for i in range(0, len(int_samples), self.chunk_size):
                     chunk = int_samples[i: i + self.chunk_size]
@@ -470,6 +476,11 @@ class AudioCapture:
     @property
     def session_pcm(self) -> bytes:
         return bytes(self._session_pcm)
+
+    @property
+    def session_sys_pcm(self) -> bytes:
+        """Полный PCM системного звука сессии (int16 mono, rate=self.rate)."""
+        return bytes(self._session_sys_pcm)
 
     @property
     def session_start(self):
